@@ -130,11 +130,9 @@ def check_symbols_soft(path, symbols):
     return [s for s in symbols if s not in out]
 
 
-def read_block_metadata(pid, actual_block_addr):
-    """Read dynablock_t metadata from /proc/PID/mem.
+def _read_block_from_fd(f, actual_block_addr):
+    """Read dynablock_t metadata using an already-open /proc/PID/mem fd.
 
-    actual_block_addr is the return value of AllocDynarecMap.
-    The first 8 bytes at actual_block_addr point to the dynablock_t struct.
     dynablock_t layout (key offsets):
       0x00: block (void*)        - pointer to native code start
       0x08: actual_block (void*) - the allocation base
@@ -144,33 +142,39 @@ def read_block_metadata(pid, actual_block_addr):
       0x4c: isize (int)          - instruction count
     """
     try:
-        with open(f"/proc/{pid}/mem", "rb") as f:
-            # Read dynablock_t* from actual_block_addr
-            f.seek(actual_block_addr)
-            db_ptr_bytes = f.read(8)
-            if len(db_ptr_bytes) < 8:
-                return None
-            db_ptr = struct.unpack("<Q", db_ptr_bytes)[0]
-            if db_ptr == 0:
-                return None
-            # Read dynablock_t fields
-            f.seek(db_ptr)
-            data = f.read(0x50)
-            if len(data) < 0x50:
-                return None
-            block = struct.unpack_from("<Q", data, 0x00)[0]
-            x64_addr = struct.unpack_from("<Q", data, 0x20)[0]
-            x64_size = struct.unpack_from("<i", data, 0x28)[0]
-            native_size = struct.unpack_from("<i", data, 0x30)[0]
-            isize = struct.unpack_from("<i", data, 0x4c)[0]
-            return {
-                "block": block,         # native code start address
-                "x64_addr": x64_addr,
-                "x64_size": x64_size,
-                "native_size": native_size,
-                "isize": isize,
-            }
+        f.seek(actual_block_addr)
+        db_ptr_bytes = f.read(8)
+        if len(db_ptr_bytes) < 8:
+            return None
+        db_ptr = struct.unpack("<Q", db_ptr_bytes)[0]
+        if db_ptr == 0:
+            return None
+        f.seek(db_ptr)
+        data = f.read(0x50)
+        if len(data) < 0x50:
+            return None
+        block = struct.unpack_from("<Q", data, 0x00)[0]
+        x64_addr = struct.unpack_from("<Q", data, 0x20)[0]
+        x64_size = struct.unpack_from("<i", data, 0x28)[0]
+        native_size = struct.unpack_from("<i", data, 0x30)[0]
+        isize = struct.unpack_from("<i", data, 0x4c)[0]
+        return {
+            "block": block,
+            "x64_addr": x64_addr,
+            "x64_size": x64_size,
+            "native_size": native_size,
+            "isize": isize,
+        }
     except (OSError, struct.error):
+        return None
+
+
+def read_block_metadata(pid, actual_block_addr):
+    """Read dynablock_t metadata from /proc/PID/mem (opens and closes fd)."""
+    try:
+        with open(f"/proc/{pid}/mem", "rb") as f:
+            return _read_block_from_fd(f, actual_block_addr)
+    except OSError:
         return None
 
 
@@ -1713,6 +1717,9 @@ def main():
         cflags.append("-DTRACK_COW")
     track_profile = args.sample_freq > 0
     if track_profile:
+        if args.no_dynarec:
+            print("ERROR: --sample-freq requires DynaRec tracking (incompatible with --no-dynarec)")
+            sys.exit(1)
         cflags.append("-DTRACK_PROFILE")
         cflags.append(f"-DPROFILE_CAPACITY={hash_cap}")
 
@@ -1882,10 +1889,51 @@ def main():
     fork_cow_data = {}
 
     # PC sampling profile state
-    prev_samples = {}           # (pid, bucket) -> count
-    block_last_active = {}      # (pid, alloc_addr) -> interval_index
-    block_sample_count = {}     # (pid, alloc_addr) -> total sample hits
-    profile_interval_idx = [0]  # mutable counter
+    prev_samples = {}               # (pid, bucket) -> count
+    block_last_active = {}          # (pid, alloc_addr) -> interval_index
+    block_active_intervals = {}     # (pid, alloc_addr) -> number of intervals active
+    profile_interval_idx = [0]      # mutable counter
+    block_meta_cache = {}           # (pid, alloc_addr) -> metadata dict or None
+    proc_mem_fds = {}               # pid -> open file object for /proc/PID/mem
+
+    def _get_proc_mem_fd(pid):
+        """Get or open a pooled /proc/PID/mem file descriptor."""
+        fd = proc_mem_fds.get(pid)
+        if fd is not None:
+            try:
+                fd.seek(0)  # test if still valid
+                return fd
+            except OSError:
+                proc_mem_fds.pop(pid, None)
+        try:
+            fd = open(f"/proc/{pid}/mem", "rb")
+            proc_mem_fds[pid] = fd
+            return fd
+        except OSError:
+            return None
+
+    def _close_proc_mem_fds():
+        """Close all pooled file descriptors."""
+        for fd in proc_mem_fds.values():
+            try:
+                fd.close()
+            except OSError:
+                pass
+        proc_mem_fds.clear()
+
+    def _cached_block_metadata(pid, alloc_addr):
+        """Read block metadata with caching and fd pooling."""
+        key = (pid, alloc_addr)
+        cached = block_meta_cache.get(key)
+        if cached is not None:
+            return cached if cached else None  # False sentinel = failed read
+        fd = _get_proc_mem_fd(pid)
+        if fd is None:
+            block_meta_cache[key] = False
+            return None
+        meta = _read_block_from_fd(fd, alloc_addr)
+        block_meta_cache[key] = meta if meta else False
+        return meta
 
     def profile_interval():
         """Diff BPF pc_samples hash to find blocks active this interval."""
@@ -1907,22 +1955,22 @@ def main():
                 active_buckets.setdefault(key[0], set()).add(key[1])
         prev_samples.update(cur)
 
-        # 3. Map active buckets to blocks
+        # 3. Map active buckets to blocks (cached metadata + pooled fds)
         for k, v in b["jit_blocks"].items():
             pid = v.pid
             if pid not in active_buckets:
                 continue
             alloc_addr = k.value
-            meta = read_block_metadata(pid, alloc_addr)
-            if not meta:
+            meta = _cached_block_metadata(pid, alloc_addr)
+            if not meta or meta["native_size"] <= 0:
                 continue
             start_b = meta["block"] >> 8
-            end_b = (meta["block"] + meta["native_size"]) >> 8
+            end_b = (meta["block"] + meta["native_size"] - 1) >> 8
             for bkt in range(start_b, end_b + 1):
                 if bkt in active_buckets[pid]:
                     bkey = (pid, alloc_addr)
                     block_last_active[bkey] = idx
-                    block_sample_count[bkey] = block_sample_count.get(bkey, 0) + 1
+                    block_active_intervals[bkey] = block_active_intervals.get(bkey, 0) + 1
                     break
 
     EVENT_NAMES = {
@@ -2164,7 +2212,6 @@ def main():
 
         # PC sampling periodic summary
         if track_profile and profile_interval_idx[0] > 0:
-            total_blocks = len(block_last_active) + len(block_sample_count) - len(block_last_active)
             # Count blocks from jit_blocks table
             jit_count = 0
             for _ in b["jit_blocks"].items():
@@ -2172,7 +2219,7 @@ def main():
             idx = profile_interval_idx[0]
             active_now = sum(1 for v in block_last_active.values() if v == idx)
             cold_60 = sum(1 for v in block_last_active.values()
-                          if idx - v > 60 // args.interval)
+                          if (idx - v) * args.interval > 60)
             print(f"  profile: {jit_count:,} blocks | active this interval: {active_now:,} | "
                   f"mapped: {len(block_last_active):,} | cold >60s: {cold_60:,}")
 
@@ -2770,11 +2817,11 @@ def main():
             total_intervals = profile_interval_idx[0]
             interval_sec = args.interval
 
-            # Gather block metadata for all tracked blocks
+            # Gather block metadata for all tracked blocks (uses cache)
             block_info = {}  # (pid, alloc) -> metadata dict
             for bkey in block_last_active:
                 pid, alloc_addr = bkey
-                meta = read_block_metadata(pid, alloc_addr)
+                meta = _cached_block_metadata(pid, alloc_addr)
                 if meta:
                     block_info[bkey] = meta
 
@@ -2782,14 +2829,14 @@ def main():
                 print(f"\n  PC Sampling Profile ({args.sample_freq} Hz, "
                       f"{total_intervals} intervals of {interval_sec}s):")
 
-                # 8a. Block Age Distribution
+                # 8a. Block Age Distribution (bounds in seconds)
                 age_buckets = [
                     ("active now", 0, 0),
-                    ("10-30s ago", 10 // interval_sec, 30 // interval_sec),
-                    ("30-60s ago", 30 // interval_sec, 60 // interval_sec),
-                    ("1-2 min ago", 60 // interval_sec, 120 // interval_sec),
-                    ("2-5 min ago", 120 // interval_sec, 300 // interval_sec),
-                    (">5 min ago", 300 // interval_sec, total_intervals + 1),
+                    ("10-30s ago", 10, 30),
+                    ("30-60s ago", 30, 60),
+                    ("1-2 min ago", 60, 120),
+                    ("2-5 min ago", 120, 300),
+                    (">5 min ago", 300, total_intervals * interval_sec + 1),
                 ]
                 # Also count "never seen" blocks (in jit_blocks but not in block_last_active)
                 all_jit_keys = set()
@@ -2802,13 +2849,13 @@ def main():
                 print(f"  {'-'*18}  {'-'*8}  {'-'*12}  {'-'*18}")
 
                 cumulative_size = 0
-                for label, lo, hi in age_buckets:
+                for label, lo_s, hi_s in age_buckets:
                     if label == "active now":
                         matching = [bk for bk, la in block_last_active.items()
                                     if la == total_intervals]
                     else:
                         matching = [bk for bk, la in block_last_active.items()
-                                    if lo <= (total_intervals - la) < hi]
+                                    if lo_s <= (total_intervals - la) * interval_sec < hi_s]
                     count = len(matching)
                     size = sum(block_info[bk]["native_size"] for bk in matching if bk in block_info)
                     if label != "active now":
@@ -2821,7 +2868,7 @@ def main():
                 # Never-executed blocks
                 never_meta = {}
                 for bk in never_seen:
-                    meta = read_block_metadata(bk[0], bk[1])
+                    meta = _cached_block_metadata(bk[0], bk[1])
                     if meta:
                         never_meta[bk] = meta
                 never_size = sum(m["native_size"] for m in never_meta.values())
@@ -2841,9 +2888,8 @@ def main():
                 print(f"  {'-'*22}  {'-'*16}  {'-'*14}  {'-'*12}")
 
                 for thresh_s in thresholds:
-                    thresh_intervals = thresh_s // interval_sec
                     evictable = [bk for bk, la in block_last_active.items()
-                                 if (total_intervals - la) >= thresh_intervals]
+                                 if (total_intervals - la) * interval_sec >= thresh_s]
                     evict_size = sum(block_info[bk]["native_size"]
                                      for bk in evictable if bk in block_info)
                     # Add never-seen blocks
@@ -2853,23 +2899,22 @@ def main():
                     print(f"  {'> ' + str(thresh_s) + ' seconds':>22s}  {evict_count:>16,}  "
                           f"{fmt_size(evict_size):>14s}  {pct:>11.1f}%")
 
-                # 8c. Top 20 Hottest Blocks
-                sorted_by_samples = sorted(block_sample_count.items(),
-                                           key=lambda x: x[1], reverse=True)
-                if sorted_by_samples:
-                    top_n = min(20, len(sorted_by_samples))
-                    print(f"\n  Top {top_n} Most-Executed Blocks:")
-                    print(f"  {'Active/Total':>14s}  {'x64 Address':>18s}  "
+                # 8c. Top 20 Hottest Blocks (by active intervals)
+                sorted_by_activity = sorted(block_active_intervals.items(),
+                                            key=lambda x: x[1], reverse=True)
+                if sorted_by_activity:
+                    top_n = min(20, len(sorted_by_activity))
+                    print(f"\n  Top {top_n} Hottest Blocks (by active intervals):")
+                    print(f"  {'Intervals':>14s}  {'x64 Address':>18s}  "
                           f"{'isize':>6s}  {'native_size':>12s}  {'PID':>7s}")
                     print(f"  {'-'*14}  {'-'*18}  {'-'*6}  {'-'*12}  {'-'*7}")
 
-                    for bkey, samples in sorted_by_samples[:top_n]:
+                    for bkey, active_count in sorted_by_activity[:top_n]:
                         pid, alloc_addr = bkey
                         meta = block_info.get(bkey)
                         if not meta:
                             continue
-                        la = block_last_active.get(bkey, 0)
-                        print(f"  {samples:>6}/{total_intervals:<6}  "
+                        print(f"  {active_count:>6}/{total_intervals:<6}  "
                               f"0x{meta['x64_addr']:016x}  "
                               f"{meta['isize']:>6}  "
                               f"{fmt_size(meta['native_size']):>12s}  "
@@ -2887,7 +2932,7 @@ def main():
                     la = block_last_active.get(bkey, 0)
                     if la == total_intervals:
                         pp["active"] += 1
-                    elif (total_intervals - la) > 60 // interval_sec:
+                    elif (total_intervals - la) * interval_sec > 60:
                         pp["cold"] += 1
                         pp["cold_size"] += block_info[bkey]["native_size"]
 
@@ -2937,6 +2982,7 @@ def main():
 
     vals = read_stats()
     print_final_report(vals)
+    _close_proc_mem_fds()
     print("[*] Detaching probes.")
 
 
