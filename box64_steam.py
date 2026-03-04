@@ -182,43 +182,53 @@ def read_proc_cmdline(pid):
     return f"pid{pid}"
 
 
-def read_block_metadata(pid, alloc_addr):
+def read_block_metadata(pid, alloc_addr, mem_file=None):
     """Read dynablock_t metadata via /proc/PID/mem.
 
     alloc_addr is the actual_block pointer returned by AllocDynarecMap.
     Layout: *(dynablock_t**)alloc_addr = pointer to dynablock_t struct.
+
+    mem_file is an optional open file handle for /proc/<pid>/mem.  When
+    provided the caller is responsible for opening/closing it; this avoids
+    a separate open()/close() for every block when the caller already
+    iterates over many blocks belonging to the same PID.
     """
+    def _read(f):
+        # Read dynablock_t* from *(void**)alloc_addr
+        f.seek(alloc_addr)
+        db_ptr = struct.unpack("Q", f.read(8))[0]
+        if db_ptr == 0:
+            return None
+        # Read a contiguous chunk from offset 0x18 to 0x50 (56 bytes)
+        # to minimize seeks
+        f.seek(db_ptr + 0x18)
+        data = f.read(0x50 - 0x18)  # 56 bytes
+        if len(data) < 0x50 - 0x18:
+            return None
+        in_used = struct.unpack_from("I", data, 0x00)[0]        # 0x18
+        tick = struct.unpack_from("I", data, 0x04)[0]           # 0x1c
+        x64_addr = struct.unpack_from("Q", data, 0x08)[0]      # 0x20
+        x64_size = struct.unpack_from("Q", data, 0x10)[0]      # 0x28
+        native_size = struct.unpack_from("Q", data, 0x18)[0]   # 0x30
+        # 0x38: prefixsize (skip), 0x3c: size
+        total_size = struct.unpack_from("i", data, 0x24)[0]    # 0x3c
+        hash_val = struct.unpack_from("I", data, 0x28)[0]      # 0x40
+        done, gone, dirty, flags_byte = struct.unpack_from("BBBB", data, 0x2c)  # 0x44-0x47
+        isize = struct.unpack_from("i", data, 0x34)[0]         # 0x4c
+        return {
+            "tick": tick, "in_used": in_used,
+            "x64_addr": x64_addr, "x64_size": x64_size,
+            "native_size": native_size, "total_size": total_size,
+            "hash": hash_val, "isize": isize,
+            "done": done, "gone": gone, "dirty": dirty,
+            "always_test": flags_byte & 0x3,
+        }
+
     try:
+        if mem_file is not None:
+            return _read(mem_file)
         with open(f"/proc/{pid}/mem", "rb") as f:
-            # Read dynablock_t* from *(void**)alloc_addr
-            f.seek(alloc_addr)
-            db_ptr = struct.unpack("Q", f.read(8))[0]
-            if db_ptr == 0:
-                return None
-            # Read a contiguous chunk from offset 0x18 to 0x50 (56 bytes)
-            # to minimize seeks
-            f.seek(db_ptr + 0x18)
-            data = f.read(0x50 - 0x18)  # 56 bytes
-            if len(data) < 0x50 - 0x18:
-                return None
-            in_used = struct.unpack_from("I", data, 0x00)[0]        # 0x18
-            tick = struct.unpack_from("I", data, 0x04)[0]           # 0x1c
-            x64_addr = struct.unpack_from("Q", data, 0x08)[0]      # 0x20
-            x64_size = struct.unpack_from("Q", data, 0x10)[0]      # 0x28
-            native_size = struct.unpack_from("Q", data, 0x18)[0]   # 0x30
-            # 0x38: prefixsize (skip), 0x3c: size
-            total_size = struct.unpack_from("i", data, 0x24)[0]    # 0x3c
-            hash_val = struct.unpack_from("I", data, 0x28)[0]      # 0x40
-            done, gone, dirty, flags_byte = struct.unpack_from("BBBB", data, 0x2c)  # 0x44-0x47
-            isize = struct.unpack_from("i", data, 0x34)[0]         # 0x4c
-            return {
-                "tick": tick, "in_used": in_used,
-                "x64_addr": x64_addr, "x64_size": x64_size,
-                "native_size": native_size, "total_size": total_size,
-                "hash": hash_val, "isize": isize,
-                "done": done, "gone": gone, "dirty": dirty,
-                "always_test": flags_byte & 0x3,
-            }
+            return _read(f)
     except (OSError, struct.error):
         return None
 
@@ -316,6 +326,8 @@ static inline struct proc_mem_t *get_or_init_proc_mem(u32 pid) {
 // [23]=protect_calls  [24]=unprotect_calls  [25]=setprot_calls
 // [26]=protect_bytes  [27]=unprotect_bytes  [28]=setprot_bytes
 // [29]=invalidation_count  [30]=mark_dirty_count  [31]=jit_dropped_count
+// [29]=invalidation_count  [30]=mark_dirty_count
+// [31]=jit_outstanding_blocks
 BPF_ARRAY(steam_stats, u64, 32);
 
 static inline void inc_stat(int idx, u64 val) {
@@ -992,16 +1004,17 @@ int jit_alloc_return(struct pt_regs *ctx) {
         blk.pid      = pid;
         blk.tid      = (u32)tid;
         blk.is_new   = p->is_new;
-        int ret = jit_blocks.update(&alloc_addr, &blk);
-        if (ret == 0) {
-            struct proc_mem_t *pm = get_or_init_proc_mem(pid);
-            if (pm) {
-                __sync_fetch_and_add(&pm->jit_alloc_count, 1);
-                __sync_fetch_and_add(&pm->jit_alloc_bytes, p->size);
-            }
-            inc_stat(6, 1);
-            inc_stat(8, p->size);
-            inc_stat(22, p->size);  // outstanding_bytes
+        jit_blocks.update(&alloc_addr, &blk);
+
+        struct proc_mem_t *pm = get_or_init_proc_mem(pid);
+        if (pm) {
+            __sync_fetch_and_add(&pm->jit_alloc_count, 1);
+            __sync_fetch_and_add(&pm->jit_alloc_bytes, p->size);
+        }
+        inc_stat(6, 1);
+        inc_stat(8, p->size);
+        inc_stat(22, p->size);  // outstanding_bytes
+        inc_stat(31, 1);        // outstanding_blocks
 
             int bucket = log2_u64(p->size);
             alloc_sizes.atomic_increment(bucket);
@@ -1036,6 +1049,7 @@ int jit_free_entry(struct pt_regs *ctx) {
         inc_stat(7, 1);
         inc_stat(9, blk->size);
         dec_stat(22, blk->size);  // outstanding_bytes
+        dec_stat(31, 1);          // outstanding_blocks
 
         // Lifetime histogram
         u64 now = bpf_ktime_get_ns();
@@ -1981,7 +1995,7 @@ def main():
             print(f"  jit_alloc: {d[6]:>8}  jit_free: {frees_delta:>8}  churn: {churn_delta:>8} ({churn_pct:.1f}%){detail_str}")
             print(f"  jit_alloc_bytes: {fmt_size(d[8]):>10}  jit_free_bytes: {fmt_size(d[9]):>10}  "
                   f"outstanding: {fmt_size(vals[22]):>10}")
-            outstanding_blocks = len(b["jit_blocks"])
+            outstanding_blocks = vals[31]
             print(f"  outstanding blocks: {outstanding_blocks}", end="")
             if outstanding_blocks >= hash_cap:
                 print(f"  *** HASH TABLE FULL (capacity {hash_cap}) — data loss! Use --hash-capacity ***")
@@ -2143,6 +2157,17 @@ def main():
                 for addr, info in sorted_inv[:top_n]:
                     print(f"  0x{addr:016x}  {info['count']:>14}  {info['isize']:>6}  0x{info['last_hash']:08x}")
 
+            # Unprotect hot zones
+            if unprot_addrs:
+                sorted_unprot = sorted(unprot_addrs.items(), key=lambda x: x[1]["count"], reverse=True)
+                top_n = min(20, len(sorted_unprot))
+                print(f"\n  Top {top_n} Unprotected Addresses (unprotectDB hot zones):")
+                print(f"  {'Address':>18s}  {'Calls':>8s}  {'Total Size':>12s}  {'Dirty Marks':>11s}")
+                print(f"  {'-'*18}  {'-'*8}  {'-'*12}  {'-'*11}")
+                for addr, info in sorted_unprot[:top_n]:
+                    print(f"  0x{addr:016x}  {info['count']:>8}  "
+                          f"{fmt_size(info['total_size']):>12}  {info['mark_count']:>11}")
+
         # -- Live block snapshot via /proc/PID/mem --
         if not args.no_dynarec:
             jit_blocks_map = b["jit_blocks"]
@@ -2153,10 +2178,29 @@ def main():
 
             live_meta = []  # list of (pid, alloc_addr, size, metadata_dict)
             for pid in sorted(blocks_by_pid.keys()):
-                for alloc_addr, blk_size in blocks_by_pid[pid]:
-                    meta = read_block_metadata(pid, alloc_addr)
-                    if meta:
-                        live_meta.append((pid, alloc_addr, blk_size, meta))
+                # Open /proc/<pid>/mem once per PID to avoid per-block open/close overhead
+                try:
+                    mem_f = open(f"/proc/{pid}/mem", "rb")
+                except OSError:
+                    mem_f = None
+                try:
+                    for alloc_addr, blk_size in blocks_by_pid[pid]:
+                        meta = read_block_metadata(pid, alloc_addr, mem_file=mem_f)
+                        if meta:
+                            live_meta.append((pid, alloc_addr, blk_size, meta))
+                finally:
+                    if mem_f is not None:
+                        mem_f.close()
+                mem_path = f"/proc/{pid}/mem"
+                try:
+                    with open(mem_path, "rb", buffering=0) as mem_f:
+                        for alloc_addr, blk_size in blocks_by_pid[pid]:
+                            meta = read_block_metadata(pid, alloc_addr, mem_f)
+                            if meta:
+                                live_meta.append((pid, alloc_addr, blk_size, meta))
+                except OSError:
+                    # Process may have exited or /proc/<pid>/mem may be unavailable.
+                    continue
 
             if live_meta:
                 # Get max tick per process for age computation
