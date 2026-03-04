@@ -17,6 +17,7 @@ from __future__ import print_function
 import argparse
 import os
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -84,6 +85,50 @@ def check_symbols_soft(path, symbols):
     if not out:
         return []  # can't verify, assume present
     return [s for s in symbols if s not in out]
+
+
+def read_block_metadata(pid, actual_block_addr):
+    """Read dynablock_t metadata from /proc/PID/mem.
+
+    actual_block_addr is the return value of AllocDynarecMap.
+    The first 8 bytes at actual_block_addr point to the dynablock_t struct.
+    dynablock_t layout (key offsets):
+      0x00: block (void*)        - pointer to native code start
+      0x08: actual_block (void*) - the allocation base
+      0x20: x64_addr (uintptr_t) - original x86_64 address
+      0x28: x64_size (int)       - x86_64 code size
+      0x30: native_size (int)    - JIT native code size
+      0x4c: isize (int)          - instruction count
+    """
+    try:
+        with open(f"/proc/{pid}/mem", "rb") as f:
+            # Read dynablock_t* from actual_block_addr
+            f.seek(actual_block_addr)
+            db_ptr_bytes = f.read(8)
+            if len(db_ptr_bytes) < 8:
+                return None
+            db_ptr = struct.unpack("<Q", db_ptr_bytes)[0]
+            if db_ptr == 0:
+                return None
+            # Read dynablock_t fields
+            f.seek(db_ptr)
+            data = f.read(0x50)
+            if len(data) < 0x50:
+                return None
+            block = struct.unpack_from("<Q", data, 0x00)[0]
+            x64_addr = struct.unpack_from("<Q", data, 0x20)[0]
+            x64_size = struct.unpack_from("<i", data, 0x28)[0]
+            native_size = struct.unpack_from("<i", data, 0x30)[0]
+            isize = struct.unpack_from("<i", data, 0x4c)[0]
+            return {
+                "block": block,         # native code start address
+                "x64_addr": x64_addr,
+                "x64_size": x64_size,
+                "native_size": native_size,
+                "isize": isize,
+            }
+    except (OSError, struct.error):
+        return None
 
 
 def read_smaps_rollup(pid):
@@ -1145,6 +1190,40 @@ int trace_cow_fault(struct pt_regs *ctx) {
 }
 
 #endif /* TRACK_COW */
+
+
+// =========================================================================
+// PC Sampling Profile (TRACK_PROFILE)
+// =========================================================================
+#ifdef TRACK_PROFILE
+
+struct pc_key_t {
+    u32 pid;
+    u32 bucket;    // ip >> 8 (256-byte granularity)
+};
+
+BPF_HASH(pc_samples, struct pc_key_t, u64, PROFILE_CAPACITY);
+
+int on_perf_sample(struct bpf_perf_event_data *ctx) {
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    struct proc_mem_t *pm = proc_mem.lookup(&pid);
+    if (!pm) return 0;
+
+    u64 ip = PT_REGS_IP(&ctx->regs);
+    if (ip == 0) return 0;
+
+    struct pc_key_t key = { .pid = pid, .bucket = (u32)(ip >> 8) };
+    u64 *v = pc_samples.lookup(&key);
+    if (v) {
+        __sync_fetch_and_add(v, 1);
+    } else {
+        u64 one = 1;
+        pc_samples.update(&key, &one);
+    }
+    return 0;
+}
+
+#endif /* TRACK_PROFILE */
 """
 
 
@@ -1175,6 +1254,8 @@ def parse_args():
                    help="Disable Copy-on-Write page fault tracking (kprobe + /proc sampling)")
     p.add_argument("--hash-capacity", type=int, default=524288,
                    help="BPF hash table capacity for outstanding alloc tracking (default: 524288)")
+    p.add_argument("--sample-freq", type=int, default=0,
+                   help="PC sampling frequency in Hz for block profiling (0=off, 4999=recommended, max ~9999)")
     return p.parse_args()
 
 
@@ -1258,6 +1339,10 @@ def main():
     track_cow = not args.no_cow
     if track_cow:
         cflags.append("-DTRACK_COW")
+    track_profile = args.sample_freq > 0
+    if track_profile:
+        cflags.append("-DTRACK_PROFILE")
+        cflags.append(f"-DPROFILE_CAPACITY={hash_cap}")
 
     # Clear stale uprobe events (Asahi Linux workaround)
     _clear_stale_uprobes(binary)
@@ -1355,6 +1440,15 @@ def main():
             print("WARNING: CoW kprobe unavailable (wp_page_copy/do_wp_page not found). "
                   "Using /proc sampling only.")
 
+    # ---- PC sampling perf event ----
+    if track_profile:
+        from bcc import PerfType, PerfSWConfig
+        b.attach_perf_event(ev_type=PerfType.SOFTWARE,
+                            ev_config=PerfSWConfig.CPU_CLOCK,
+                            fn_name="on_perf_sample",
+                            sample_freq=args.sample_freq)
+        print(f"[*] PC sampling attached at {args.sample_freq} Hz")
+
     pid_str = f" (PID {args.pid})" if args.pid else " (all PIDs)"
     features = []
     if not args.no_mem:
@@ -1367,6 +1461,8 @@ def main():
         features.append("threads")
     if track_cow:
         features.append("cow")
+    if track_profile:
+        features.append(f"profile@{args.sample_freq}Hz")
     print(f"[*] {probe_count} probes attached{pid_str}. Features: {', '.join(features)}. "
           f"Interval: {args.interval}s. Ctrl+C to stop.")
 
@@ -1395,6 +1491,50 @@ def main():
     clone_children = {}
     process_children = {}
     fork_cow_data = {}
+
+    # PC sampling profile state
+    prev_samples = {}           # (pid, bucket) -> count
+    block_last_active = {}      # (pid, alloc_addr) -> interval_index
+    block_sample_count = {}     # (pid, alloc_addr) -> total sample hits
+    profile_interval_idx = [0]  # mutable counter
+
+    def profile_interval():
+        """Diff BPF pc_samples hash to find blocks active this interval."""
+        if not track_profile:
+            return
+        profile_interval_idx[0] += 1
+        idx = profile_interval_idx[0]
+
+        # 1. Read current BPF hash
+        cur = {}
+        for k, v in b["pc_samples"].items():
+            cur[(k.pid, k.bucket)] = v.value
+
+        # 2. Compute delta (new samples this interval)
+        active_buckets = {}  # pid -> set of buckets with new samples
+        for key, count in cur.items():
+            prev = prev_samples.get(key, 0)
+            if count > prev:
+                active_buckets.setdefault(key[0], set()).add(key[1])
+        prev_samples.update(cur)
+
+        # 3. Map active buckets to blocks
+        for k, v in b["jit_blocks"].items():
+            pid = v.pid
+            if pid not in active_buckets:
+                continue
+            alloc_addr = k.value
+            meta = read_block_metadata(pid, alloc_addr)
+            if not meta:
+                continue
+            start_b = meta["block"] >> 8
+            end_b = (meta["block"] + meta["native_size"]) >> 8
+            for bkt in range(start_b, end_b + 1):
+                if bkt in active_buckets[pid]:
+                    bkey = (pid, alloc_addr)
+                    block_last_active[bkey] = idx
+                    block_sample_count[bkey] = block_sample_count.get(bkey, 0) + 1
+                    break
 
     EVENT_NAMES = {
         0: "fork",         1: "vfork",        2: "x64emu_fork",
@@ -1556,6 +1696,20 @@ def main():
                           f"RSS={fmt_size(rss):>10}  PSS={fmt_size(pss):>10}")
                     smaps_history.setdefault(pid, []).append(
                         (time.monotonic(), smaps))
+
+        # PC sampling periodic summary
+        if track_profile and profile_interval_idx[0] > 0:
+            total_blocks = len(block_last_active) + len(block_sample_count) - len(block_last_active)
+            # Count blocks from jit_blocks table
+            jit_count = 0
+            for _ in b["jit_blocks"].items():
+                jit_count += 1
+            idx = profile_interval_idx[0]
+            active_now = sum(1 for v in block_last_active.values() if v == idx)
+            cold_60 = sum(1 for v in block_last_active.values()
+                          if idx - v > 60 // args.interval)
+            print(f"  profile: {jit_count:,} blocks | active this interval: {active_now:,} | "
+                  f"mapped: {len(block_last_active):,} | cold >60s: {cold_60:,}")
 
     # ---- Final report ----
     def print_final_report(vals):
@@ -1897,6 +2051,144 @@ def main():
                     label_str = f"  [{label}]" if label else ""
                     print(f"  {pid:>7}  {faults:>12}  {fmt_size(faults * page_size):>12}{label_str}")
 
+        # -- Section 8: PC Sampling Profile --
+        if track_profile and block_last_active:
+            total_intervals = profile_interval_idx[0]
+            interval_sec = args.interval
+
+            # Gather block metadata for all tracked blocks
+            block_info = {}  # (pid, alloc) -> metadata dict
+            for bkey in block_last_active:
+                pid, alloc_addr = bkey
+                meta = read_block_metadata(pid, alloc_addr)
+                if meta:
+                    block_info[bkey] = meta
+
+            if block_info:
+                print(f"\n  PC Sampling Profile ({args.sample_freq} Hz, "
+                      f"{total_intervals} intervals of {interval_sec}s):")
+
+                # 8a. Block Age Distribution
+                age_buckets = [
+                    ("active now", 0, 0),
+                    ("10-30s ago", 10 // interval_sec, 30 // interval_sec),
+                    ("30-60s ago", 30 // interval_sec, 60 // interval_sec),
+                    ("1-2 min ago", 60 // interval_sec, 120 // interval_sec),
+                    ("2-5 min ago", 120 // interval_sec, 300 // interval_sec),
+                    (">5 min ago", 300 // interval_sec, total_intervals + 1),
+                ]
+                # Also count "never seen" blocks (in jit_blocks but not in block_last_active)
+                all_jit_keys = set()
+                for k, v in b["jit_blocks"].items():
+                    all_jit_keys.add((v.pid, k.value))
+                never_seen = all_jit_keys - set(block_last_active.keys())
+
+                print(f"\n  Block Age Distribution:")
+                print(f"  {'Age':>18s}  {'Blocks':>8s}  {'Native Size':>12s}  {'Cumul. Evictable':>18s}")
+                print(f"  {'-'*18}  {'-'*8}  {'-'*12}  {'-'*18}")
+
+                cumulative_size = 0
+                for label, lo, hi in age_buckets:
+                    if label == "active now":
+                        matching = [bk for bk, la in block_last_active.items()
+                                    if la == total_intervals]
+                    else:
+                        matching = [bk for bk, la in block_last_active.items()
+                                    if lo <= (total_intervals - la) < hi]
+                    count = len(matching)
+                    size = sum(block_info[bk]["native_size"] for bk in matching if bk in block_info)
+                    if label != "active now":
+                        cumulative_size += size
+                        cum_str = fmt_size(cumulative_size)
+                    else:
+                        cum_str = "—"
+                    print(f"  {label:>18s}  {count:>8,}  {fmt_size(size):>12s}  {cum_str:>18s}")
+
+                # Never-executed blocks
+                never_meta = {}
+                for bk in never_seen:
+                    meta = read_block_metadata(bk[0], bk[1])
+                    if meta:
+                        never_meta[bk] = meta
+                never_size = sum(m["native_size"] for m in never_meta.values())
+                cumulative_size += never_size
+                print(f"  {'never executed':>18s}  {len(never_meta):>8,}  "
+                      f"{fmt_size(never_size):>12s}  {fmt_size(cumulative_size):>18s}")
+
+                total_blocks_profiled = len(block_info) + len(never_meta)
+                total_native = sum(m["native_size"] for m in block_info.values()) + never_size
+                print(f"  {'Total':>18s}  {total_blocks_profiled:>8,}  {fmt_size(total_native):>12s}")
+
+                # 8b. Eviction Threshold Analysis
+                thresholds = [10, 30, 60, 120, 300]
+                print(f"\n  Eviction Threshold Analysis:")
+                print(f"  {'Evict if unused for':>22s}  {'Blocks evicted':>16s}  "
+                      f"{'Memory saved':>14s}  {'% of cache':>12s}")
+                print(f"  {'-'*22}  {'-'*16}  {'-'*14}  {'-'*12}")
+
+                for thresh_s in thresholds:
+                    thresh_intervals = thresh_s // interval_sec
+                    evictable = [bk for bk, la in block_last_active.items()
+                                 if (total_intervals - la) >= thresh_intervals]
+                    evict_size = sum(block_info[bk]["native_size"]
+                                     for bk in evictable if bk in block_info)
+                    # Add never-seen blocks
+                    evict_count = len(evictable) + len(never_meta)
+                    evict_size += never_size
+                    pct = (evict_size / total_native * 100) if total_native > 0 else 0
+                    print(f"  {'> ' + str(thresh_s) + ' seconds':>22s}  {evict_count:>16,}  "
+                          f"{fmt_size(evict_size):>14s}  {pct:>11.1f}%")
+
+                # 8c. Top 20 Hottest Blocks
+                sorted_by_samples = sorted(block_sample_count.items(),
+                                           key=lambda x: x[1], reverse=True)
+                if sorted_by_samples:
+                    top_n = min(20, len(sorted_by_samples))
+                    print(f"\n  Top {top_n} Most-Executed Blocks:")
+                    print(f"  {'Active/Total':>14s}  {'x64 Address':>18s}  "
+                          f"{'isize':>6s}  {'native_size':>12s}  {'PID':>7s}")
+                    print(f"  {'-'*14}  {'-'*18}  {'-'*6}  {'-'*12}  {'-'*7}")
+
+                    for bkey, samples in sorted_by_samples[:top_n]:
+                        pid, alloc_addr = bkey
+                        meta = block_info.get(bkey)
+                        if not meta:
+                            continue
+                        la = block_last_active.get(bkey, 0)
+                        print(f"  {samples:>6}/{total_intervals:<6}  "
+                              f"0x{meta['x64_addr']:016x}  "
+                              f"{meta['isize']:>6}  "
+                              f"{fmt_size(meta['native_size']):>12s}  "
+                              f"{pid:>7}")
+
+                # 8d. Per-Process Profile Summary
+                per_pid_profile = {}  # pid -> {blocks, active, cold, cold_size}
+                for bkey in block_info:
+                    pid = bkey[0]
+                    if pid not in per_pid_profile:
+                        per_pid_profile[pid] = {"blocks": 0, "active": 0,
+                                                "cold": 0, "cold_size": 0}
+                    pp = per_pid_profile[pid]
+                    pp["blocks"] += 1
+                    la = block_last_active.get(bkey, 0)
+                    if la == total_intervals:
+                        pp["active"] += 1
+                    elif (total_intervals - la) > 60 // interval_sec:
+                        pp["cold"] += 1
+                        pp["cold_size"] += block_info[bkey]["native_size"]
+
+                if per_pid_profile:
+                    print(f"\n  Per-Process Profile:")
+                    print(f"  {'PID':>7s}  {'Label':>20s}  {'Blocks':>8s}  {'Active':>8s}  "
+                          f"{'Cold>60s':>10s}  {'Cold Size':>12s}")
+                    print(f"  {'-'*7}  {'-'*20}  {'-'*8}  {'-'*8}  {'-'*10}  {'-'*12}")
+                    for pid in sorted(per_pid_profile.keys()):
+                        pp = per_pid_profile[pid]
+                        label = pid_labels.get(pid, f"pid{pid}")[:20]
+                        print(f"  {pid:>7}  {label:>20s}  {pp['blocks']:>8,}  "
+                              f"{pp['active']:>8,}  {pp['cold']:>10,}  "
+                              f"{fmt_size(pp['cold_size']):>12s}")
+
         print("\n" + "=" * 76)
 
     # ---- Main loop ----
@@ -1916,6 +2208,8 @@ def main():
             print_periodic(vals, prev_vals)
             prev_vals = vals
             last_print = time.monotonic()
+            # PC sampling interval diff
+            profile_interval()
             # CoW child sampling
             for parent_pid, cow_info in fork_cow_data.items():
                 for child_pid in process_children.get(parent_pid, []):
