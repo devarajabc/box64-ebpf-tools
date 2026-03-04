@@ -25,8 +25,10 @@ try:
     from bcc import BPF
 except ImportError:
     print("ERROR: python3-bcc (BCC toolkit) is required. Install it with:")
-    print("  sudo apt install python3-bcc bpfcc-tools  # Debian/Ubuntu")
+    print("  sudo apt install python3-bcc bpfcc-tools  # Debian/Ubuntu/Raspberry Pi OS")
     print("  sudo dnf install python3-bcc bcc-tools     # Fedora")
+    print("  sudo pacman -S python-bcc bcc-tools        # Arch Linux / Manjaro ARM")
+    print("  sudo zypper install python3-bcc bcc-tools  # openSUSE")
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
