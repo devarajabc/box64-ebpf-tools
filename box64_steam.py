@@ -315,8 +315,8 @@ static inline struct proc_mem_t *get_or_init_proc_mem(u32 pid) {
 // [21]=jit_churn_count  [22]=jit_outstanding_bytes
 // [23]=protect_calls  [24]=unprotect_calls  [25]=setprot_calls
 // [26]=protect_bytes  [27]=unprotect_bytes  [28]=setprot_bytes
-// [29]=invalidation_count  [30]=mark_dirty_count
-BPF_ARRAY(steam_stats, u64, 31);
+// [29]=invalidation_count  [30]=mark_dirty_count  [31]=jit_dropped_count
+BPF_ARRAY(steam_stats, u64, 32);
 
 static inline void inc_stat(int idx, u64 val) {
     int key = idx;
@@ -993,22 +993,24 @@ int jit_alloc_return(struct pt_regs *ctx) {
         blk.pid      = pid;
         blk.tid      = (u32)tid;
         blk.is_new   = p->is_new;
-        jit_blocks.update(&alloc_addr, &blk);
+        if (jit_blocks.update(&alloc_addr, &blk) == 0) {
+            struct proc_mem_t *pm = get_or_init_proc_mem(pid);
+            if (pm) {
+                __sync_fetch_and_add(&pm->jit_alloc_count, 1);
+                __sync_fetch_and_add(&pm->jit_alloc_bytes, p->size);
+            }
+            inc_stat(6, 1);
+            inc_stat(8, p->size);
+            inc_stat(22, p->size);  // outstanding_bytes
 
-        struct proc_mem_t *pm = get_or_init_proc_mem(pid);
-        if (pm) {
-            __sync_fetch_and_add(&pm->jit_alloc_count, 1);
-            __sync_fetch_and_add(&pm->jit_alloc_bytes, p->size);
-        }
-        inc_stat(6, 1);
-        inc_stat(8, p->size);
-        inc_stat(22, p->size);  // outstanding_bytes
-
-        int bucket = log2_u64(p->size);
-        alloc_sizes.atomic_increment(bucket);
+            int bucket = log2_u64(p->size);
+            alloc_sizes.atomic_increment(bucket);
 #ifdef TRACK_THREADS
-        update_thread_alloc(p->size);
+            update_thread_alloc(p->size);
 #endif
+        } else {
+            inc_stat(31, 1);  // jit_dropped_count: hash table full
+        }
     }
 
     jit_pending.delete(&tid);
@@ -1955,11 +1957,11 @@ def main():
     # ---- Stats reading ----
     def read_stats():
         st = b["steam_stats"]
-        return [st[st.Key(i)].value for i in range(31)]
+        return [st[st.Key(i)].value for i in range(32)]
 
     # ---- Periodic summary ----
     def print_periodic(vals, prev_vals):
-        d = [vals[i] - prev_vals[i] for i in range(31)]
+        d = [vals[i] - prev_vals[i] for i in range(32)]
 
         print(f"\n--- {time.strftime('%H:%M:%S')} --- Box64+Steam ---")
         print(f"  fork: {d[14]:>6}  vfork: {d[15]:>6}  exec: {d[16]:>6}"
@@ -1985,6 +1987,8 @@ def main():
                 print(f"  *** HASH TABLE FULL (capacity {hash_cap}) — data loss! Use --hash-capacity ***")
             else:
                 print()
+            if d[31] > 0:
+                print(f"  *** jit_dropped: {d[31]} alloc(s) lost (hash table full) ***")
 
         if track_prot:
             print(f"  protectDB: {d[23]:>8} ({fmt_size(d[26]):>10})   "
@@ -2054,6 +2058,8 @@ def main():
             print(f"    Bytes allocated:  {fmt_size(vals[8]):>12}")
             print(f"    Bytes freed:      {fmt_size(vals[9]):>12}")
             print(f"    Outstanding:      {fmt_size(vals[22]):>12}")
+            if vals[31] > 0:
+                print(f"    Dropped (table full): {vals[31]:>10}  *** Re-run with --hash-capacity {hash_cap * 4}")
 
         if track_prot:
             print(f"\n  Protection Overhead:")
