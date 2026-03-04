@@ -1535,7 +1535,7 @@ int trace_cow_fault(struct pt_regs *ctx) {
 
 struct pc_key_t {
     u32 pid;
-    u32 bucket;    // ip >> 8 (256-byte granularity)
+    u64 bucket;    // ip >> 8 (256-byte granularity, full 64-bit to avoid truncation)
 };
 
 BPF_HASH(pc_samples, struct pc_key_t, u64, PROFILE_CAPACITY);
@@ -1548,7 +1548,12 @@ int on_perf_sample(struct bpf_perf_event_data *ctx) {
     u64 ip = PT_REGS_IP(&ctx->regs);
     if (ip == 0) return 0;
 
-    struct pc_key_t key = { .pid = pid, .bucket = (u32)(ip >> 8) };
+    // Skip kernel addresses (high-half: bit 63 set) to avoid polluting the map
+    if (ip >> 63) return 0;
+
+    struct pc_key_t key = {};
+    key.pid = pid;
+    key.bucket = ip >> 8;
     u64 *v = pc_samples.lookup(&key);
     if (v) {
         __sync_fetch_and_add(v, 1);
