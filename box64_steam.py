@@ -2148,10 +2148,16 @@ def main():
 
             live_meta = []  # list of (pid, alloc_addr, size, metadata_dict)
             for pid in sorted(blocks_by_pid.keys()):
-                for alloc_addr, blk_size in blocks_by_pid[pid]:
-                    meta = read_block_metadata(pid, alloc_addr)
-                    if meta:
-                        live_meta.append((pid, alloc_addr, blk_size, meta))
+                mem_path = f"/proc/{pid}/mem"
+                try:
+                    with open(mem_path, "rb", buffering=0) as mem_f:
+                        for alloc_addr, blk_size in blocks_by_pid[pid]:
+                            meta = read_block_metadata(pid, alloc_addr, mem_f)
+                            if meta:
+                                live_meta.append((pid, alloc_addr, blk_size, meta))
+                except OSError:
+                    # Process may have exited or /proc/<pid>/mem may be unavailable.
+                    continue
 
             if live_meta:
                 # Get max tick per process for age computation
