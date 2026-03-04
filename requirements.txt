@@ -1,0 +1,12 @@
+# box64-ebpf-tools Python dependencies
+#
+# NOTE: The primary dependency (bcc) is a system package and cannot be installed
+# via pip. Install it using your distribution's package manager:
+#
+#   Debian/Ubuntu/Raspberry Pi OS:  sudo apt install python3-bcc bpfcc-tools
+#   Fedora:                         sudo dnf install python3-bcc bcc-tools
+#   Arch Linux / Manjaro ARM:       sudo pacman -S python-bcc bcc-tools
+#   openSUSE:                       sudo zypper install python3-bcc bcc-tools
+#
+# All other imports (argparse, os, signal, subprocess, sys, time) are part of
+# the Python standard library and require no additional installation.

@@ -13,11 +13,17 @@ internal functions at runtime with minimal overhead and no recompilation.
 - **Linux >= 4.9** (BPF uprobe support)
 - **python3-bcc** (BCC toolkit):
   ```bash
-  # Debian/Ubuntu
+  # Debian/Ubuntu/Raspberry Pi OS
   sudo apt install python3-bcc bpfcc-tools
 
   # Fedora
   sudo dnf install python3-bcc bcc-tools
+
+  # Arch Linux / Manjaro ARM
+  sudo pacman -S python-bcc bcc-tools
+
+  # openSUSE
+  sudo zypper install python3-bcc bcc-tools
   ```
 - **Box64 built with debug symbols** (`-DCMAKE_BUILD_TYPE=RelWithDebInfo`).
   The binary must not be stripped -- the tools use `nm` to verify that required
