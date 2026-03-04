@@ -326,7 +326,8 @@ static inline struct proc_mem_t *get_or_init_proc_mem(u32 pid) {
 // [23]=protect_calls  [24]=unprotect_calls  [25]=setprot_calls
 // [26]=protect_bytes  [27]=unprotect_bytes  [28]=setprot_bytes
 // [29]=invalidation_count  [30]=mark_dirty_count
-BPF_ARRAY(steam_stats, u64, 31);
+// [31]=jit_outstanding_blocks
+BPF_ARRAY(steam_stats, u64, 32);
 
 static inline void inc_stat(int idx, u64 val) {
     int key = idx;
@@ -1012,6 +1013,7 @@ int jit_alloc_return(struct pt_regs *ctx) {
         inc_stat(6, 1);
         inc_stat(8, p->size);
         inc_stat(22, p->size);  // outstanding_bytes
+        inc_stat(31, 1);        // outstanding_blocks
 
         int bucket = log2_u64(p->size);
         alloc_sizes.atomic_increment(bucket);
@@ -1043,6 +1045,7 @@ int jit_free_entry(struct pt_regs *ctx) {
         inc_stat(7, 1);
         inc_stat(9, blk->size);
         dec_stat(22, blk->size);  // outstanding_bytes
+        dec_stat(31, 1);          // outstanding_blocks
 
         // Lifetime histogram
         u64 now = bpf_ktime_get_ns();
@@ -1964,11 +1967,11 @@ def main():
     # ---- Stats reading ----
     def read_stats():
         st = b["steam_stats"]
-        return [st[st.Key(i)].value for i in range(31)]
+        return [st[st.Key(i)].value for i in range(32)]
 
     # ---- Periodic summary ----
     def print_periodic(vals, prev_vals):
-        d = [vals[i] - prev_vals[i] for i in range(31)]
+        d = [vals[i] - prev_vals[i] for i in range(32)]
 
         print(f"\n--- {time.strftime('%H:%M:%S')} --- Box64+Steam ---")
         print(f"  fork: {d[14]:>6}  vfork: {d[15]:>6}  exec: {d[16]:>6}"
@@ -1988,7 +1991,7 @@ def main():
             print(f"  jit_alloc: {d[6]:>8}  jit_free: {frees_delta:>8}  churn: {churn_delta:>8} ({churn_pct:.1f}%){detail_str}")
             print(f"  jit_alloc_bytes: {fmt_size(d[8]):>10}  jit_free_bytes: {fmt_size(d[9]):>10}  "
                   f"outstanding: {fmt_size(vals[22]):>10}")
-            outstanding_blocks = len(b["jit_blocks"])
+            outstanding_blocks = vals[31]
             print(f"  outstanding blocks: {outstanding_blocks}", end="")
             if outstanding_blocks >= hash_cap:
                 print(f"  *** HASH TABLE FULL (capacity {hash_cap}) — data loss! Use --hash-capacity ***")
@@ -2148,6 +2151,17 @@ def main():
                 for addr, info in sorted_inv[:top_n]:
                     print(f"  0x{addr:016x}  {info['count']:>14}  {info['isize']:>6}  0x{info['last_hash']:08x}")
 
+            # Unprotect hot zones
+            if unprot_addrs:
+                sorted_unprot = sorted(unprot_addrs.items(), key=lambda x: x[1]["count"], reverse=True)
+                top_n = min(20, len(sorted_unprot))
+                print(f"\n  Top {top_n} Unprotected Addresses (unprotectDB hot zones):")
+                print(f"  {'Address':>18s}  {'Calls':>8s}  {'Total Size':>12s}  {'Dirty Marks':>11s}")
+                print(f"  {'-'*18}  {'-'*8}  {'-'*12}  {'-'*11}")
+                for addr, info in sorted_unprot[:top_n]:
+                    print(f"  0x{addr:016x}  {info['count']:>8}  "
+                          f"{fmt_size(info['total_size']):>12}  {info['mark_count']:>11}")
+
         # -- Live block snapshot via /proc/PID/mem --
         if not args.no_dynarec:
             jit_blocks_map = b["jit_blocks"]
@@ -2171,6 +2185,16 @@ def main():
                 finally:
                     if mem_f is not None:
                         mem_f.close()
+                mem_path = f"/proc/{pid}/mem"
+                try:
+                    with open(mem_path, "rb", buffering=0) as mem_f:
+                        for alloc_addr, blk_size in blocks_by_pid[pid]:
+                            meta = read_block_metadata(pid, alloc_addr, mem_f)
+                            if meta:
+                                live_meta.append((pid, alloc_addr, blk_size, meta))
+                except OSError:
+                    # Process may have exited or /proc/<pid>/mem may be unavailable.
+                    continue
 
             if live_meta:
                 # Get max tick per process for age computation
