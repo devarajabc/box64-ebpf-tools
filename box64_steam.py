@@ -155,8 +155,8 @@ def _read_block_from_fd(f, actual_block_addr):
             return None
         block = struct.unpack_from("<Q", data, 0x00)[0]
         x64_addr = struct.unpack_from("<Q", data, 0x20)[0]
-        x64_size = struct.unpack_from("<i", data, 0x28)[0]
-        native_size = struct.unpack_from("<i", data, 0x30)[0]
+        x64_size = struct.unpack_from("<Q", data, 0x28)[0]
+        native_size = struct.unpack_from("<Q", data, 0x30)[0]
         isize = struct.unpack_from("<i", data, 0x4c)[0]
         return {
             "block": block,
