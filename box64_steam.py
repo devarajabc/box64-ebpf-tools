@@ -1836,11 +1836,22 @@ def main():
     # ---- PC sampling perf event ----
     if track_profile:
         from bcc import PerfType, PerfSWConfig
-        b.attach_perf_event(ev_type=PerfType.SOFTWARE,
-                            ev_config=PerfSWConfig.CPU_CLOCK,
-                            fn_name="on_perf_sample",
-                            sample_freq=args.sample_freq)
-        print(f"[*] PC sampling attached at {args.sample_freq} Hz")
+        pid_filter = args.pid if getattr(args, "pid", None) else -1
+        try:
+            b.attach_perf_event(ev_type=PerfType.SOFTWARE,
+                                ev_config=PerfSWConfig.CPU_CLOCK,
+                                fn_name="on_perf_sample",
+                                sample_freq=args.sample_freq,
+                                pid=pid_filter)
+        except Exception as e:
+            print(f"[!] ERROR: Failed to attach PC sampling perf event at "
+                  f"{args.sample_freq} Hz (pid={pid_filter}).")
+            print(f"    Reason: {e}")
+            print("    Hint: Ensure you have sufficient permissions (try running as root), "
+                  "check /proc/sys/kernel/perf_event_paranoid, or reduce --sample-freq.")
+            sys.exit(1)
+        target_desc = f"PID {args.pid}" if getattr(args, "pid", None) else "all PIDs"
+        print(f"[*] PC sampling attached at {args.sample_freq} Hz for {target_desc}")
 
     pid_str = f" (PID {args.pid})" if args.pid else " (all PIDs)"
     features = []
