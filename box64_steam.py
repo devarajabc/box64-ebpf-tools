@@ -440,7 +440,6 @@ struct unprot_event_t {
 };
 BPF_PERF_OUTPUT(unprot_events);
 
-BPF_HISTOGRAM(death_tick_ages, int, 64);
 BPF_HISTOGRAM(death_isizes, int, 64);
 BPF_HISTOGRAM(death_native_sizes, int, 64);
 #endif /* TRACK_BLOCK_DETAIL */
