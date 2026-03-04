@@ -182,43 +182,53 @@ def read_proc_cmdline(pid):
     return f"pid{pid}"
 
 
-def read_block_metadata(pid, alloc_addr):
+def read_block_metadata(pid, alloc_addr, mem_file=None):
     """Read dynablock_t metadata via /proc/PID/mem.
 
     alloc_addr is the actual_block pointer returned by AllocDynarecMap.
     Layout: *(dynablock_t**)alloc_addr = pointer to dynablock_t struct.
+
+    mem_file is an optional open file handle for /proc/<pid>/mem.  When
+    provided the caller is responsible for opening/closing it; this avoids
+    a separate open()/close() for every block when the caller already
+    iterates over many blocks belonging to the same PID.
     """
+    def _read(f):
+        # Read dynablock_t* from *(void**)alloc_addr
+        f.seek(alloc_addr)
+        db_ptr = struct.unpack("Q", f.read(8))[0]
+        if db_ptr == 0:
+            return None
+        # Read a contiguous chunk from offset 0x18 to 0x50 (56 bytes)
+        # to minimize seeks
+        f.seek(db_ptr + 0x18)
+        data = f.read(0x50 - 0x18)  # 56 bytes
+        if len(data) < 0x50 - 0x18:
+            return None
+        in_used = struct.unpack_from("I", data, 0x00)[0]        # 0x18
+        tick = struct.unpack_from("I", data, 0x04)[0]           # 0x1c
+        x64_addr = struct.unpack_from("Q", data, 0x08)[0]      # 0x20
+        x64_size = struct.unpack_from("Q", data, 0x10)[0]      # 0x28
+        native_size = struct.unpack_from("Q", data, 0x18)[0]   # 0x30
+        # 0x38: prefixsize (skip), 0x3c: size
+        total_size = struct.unpack_from("i", data, 0x24)[0]    # 0x3c
+        hash_val = struct.unpack_from("I", data, 0x28)[0]      # 0x40
+        done, gone, dirty, flags_byte = struct.unpack_from("BBBB", data, 0x2c)  # 0x44-0x47
+        isize = struct.unpack_from("i", data, 0x34)[0]         # 0x4c
+        return {
+            "tick": tick, "in_used": in_used,
+            "x64_addr": x64_addr, "x64_size": x64_size,
+            "native_size": native_size, "total_size": total_size,
+            "hash": hash_val, "isize": isize,
+            "done": done, "gone": gone, "dirty": dirty,
+            "always_test": flags_byte & 0x3,
+        }
+
     try:
+        if mem_file is not None:
+            return _read(mem_file)
         with open(f"/proc/{pid}/mem", "rb") as f:
-            # Read dynablock_t* from *(void**)alloc_addr
-            f.seek(alloc_addr)
-            db_ptr = struct.unpack("Q", f.read(8))[0]
-            if db_ptr == 0:
-                return None
-            # Read a contiguous chunk from offset 0x18 to 0x50 (56 bytes)
-            # to minimize seeks
-            f.seek(db_ptr + 0x18)
-            data = f.read(0x50 - 0x18)  # 56 bytes
-            if len(data) < 0x50 - 0x18:
-                return None
-            in_used = struct.unpack_from("I", data, 0x00)[0]        # 0x18
-            tick = struct.unpack_from("I", data, 0x04)[0]           # 0x1c
-            x64_addr = struct.unpack_from("Q", data, 0x08)[0]      # 0x20
-            x64_size = struct.unpack_from("Q", data, 0x10)[0]      # 0x28
-            native_size = struct.unpack_from("Q", data, 0x18)[0]   # 0x30
-            # 0x38: prefixsize (skip), 0x3c: size
-            total_size = struct.unpack_from("i", data, 0x24)[0]    # 0x3c
-            hash_val = struct.unpack_from("I", data, 0x28)[0]      # 0x40
-            done, gone, dirty, flags_byte = struct.unpack_from("BBBB", data, 0x2c)  # 0x44-0x47
-            isize = struct.unpack_from("i", data, 0x34)[0]         # 0x4c
-            return {
-                "tick": tick, "in_used": in_used,
-                "x64_addr": x64_addr, "x64_size": x64_size,
-                "native_size": native_size, "total_size": total_size,
-                "hash": hash_val, "isize": isize,
-                "done": done, "gone": gone, "dirty": dirty,
-                "always_test": flags_byte & 0x3,
-            }
+            return _read(f)
     except (OSError, struct.error):
         return None
 
@@ -2162,6 +2172,19 @@ def main():
 
             live_meta = []  # list of (pid, alloc_addr, size, metadata_dict)
             for pid in sorted(blocks_by_pid.keys()):
+                # Open /proc/<pid>/mem once per PID to avoid per-block open/close overhead
+                try:
+                    mem_f = open(f"/proc/{pid}/mem", "rb")
+                except OSError:
+                    mem_f = None
+                try:
+                    for alloc_addr, blk_size in blocks_by_pid[pid]:
+                        meta = read_block_metadata(pid, alloc_addr, mem_file=mem_f)
+                        if meta:
+                            live_meta.append((pid, alloc_addr, blk_size, meta))
+                finally:
+                    if mem_f is not None:
+                        mem_f.close()
                 mem_path = f"/proc/{pid}/mem"
                 try:
                     with open(mem_path, "rb", buffering=0) as mem_f:
