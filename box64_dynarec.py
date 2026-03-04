@@ -41,6 +41,7 @@ def fmt_size(n):
 
 
 def check_binary(path):
+    """Verify binary exists and is readable."""
     if not os.path.isfile(path):
         print(f"ERROR: binary not found: {path}")
         sys.exit(1)
@@ -129,6 +130,7 @@ def _clear_stale_uprobes(binary):
     """
     import shutil
     try:
+        # Clear all uprobe events
         uprobe_events = "/sys/kernel/debug/tracing/uprobe_events"
         if os.path.exists(uprobe_events):
             with open(uprobe_events, "w") as f:
@@ -136,14 +138,18 @@ def _clear_stale_uprobes(binary):
     except OSError:
         pass
     try:
+        # Force a new inode: copy then atomic rename back.
+        # The kernel caches stale ref_ctr_offset per inode; a new inode
+        # guarantees a clean slate.
         tmp = binary + ".uprobe_fix"
         shutil.copy2(binary, tmp)
         os.rename(tmp, binary)
         os.sync()
+        # Drop kernel caches to release old inode references
         with open("/proc/sys/vm/drop_caches", "w") as f:
             f.write("3\n")
     except OSError:
-        pass
+        pass  # best-effort; may still work without this
 
 
 # ---------------------------------------------------------------------------
@@ -671,15 +677,6 @@ def fmt_ns(ns):
         return f"{ns/1_000_000:.1f}ms"
     else:
         return f"{ns/1_000_000_000:.2f}s"
-
-
-def fmt_size(n):
-    """Human-readable byte size."""
-    for unit in ("B", "KB", "MB", "GB"):
-        if abs(n) < 1024.0:
-            return f"{n:.1f} {unit}"
-        n /= 1024.0
-    return f"{n:.1f} TB"
 
 
 # ---------------------------------------------------------------------------
