@@ -169,15 +169,6 @@ def _read_block_from_fd(f, actual_block_addr):
         return None
 
 
-def read_block_metadata(pid, actual_block_addr):
-    """Read dynablock_t metadata from /proc/PID/mem (opens and closes fd)."""
-    try:
-        with open(f"/proc/{pid}/mem", "rb") as f:
-            return _read_block_from_fd(f, actual_block_addr)
-    except OSError:
-        return None
-
-
 def read_smaps_rollup(pid):
     """Read /proc/PID/smaps_rollup for CoW-relevant memory stats."""
     result = {}
