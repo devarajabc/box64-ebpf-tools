@@ -1551,7 +1551,7 @@ BPF_HASH(pc_samples, struct pc_key_t, u64, PROFILE_CAPACITY);
 
 int on_perf_sample(struct bpf_perf_event_data *ctx) {
     u32 pid = bpf_get_current_pid_tgid() >> 32;
-    struct proc_mem_t *pm = proc_mem.lookup(&pid);
+    struct proc_mem_t *pm = get_or_init_proc_mem(pid);
     if (!pm) return 0;
 
     u64 ip = PT_REGS_IP(&ctx->regs);
