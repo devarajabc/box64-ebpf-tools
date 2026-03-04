@@ -79,11 +79,11 @@ def format_log2_hist(hist_map, val_type="value"):
         bar_len = int(count * max_bar / max_count) if max_count > 0 else 0
         bar = "#" * bar_len
         if val_type == "ns":
-            lines.append(f"    [{fmt_ns(low):>10s}, {fmt_ns(high):>10s}) : {count:>8} {bar}")
+            lines.append(f"    [{fmt_ns(low):>10s}, {fmt_ns(high):>10s}] : {count:>8} {bar}")
         elif val_type == "bytes":
-            lines.append(f"    [{fmt_size(low):>10s}, {fmt_size(high):>10s}) : {count:>8} {bar}")
+            lines.append(f"    [{fmt_size(low):>10s}, {fmt_size(high):>10s}] : {count:>8} {bar}")
         else:
-            lines.append(f"    [{low:>10}, {high:>10}) : {count:>8} {bar}")
+            lines.append(f"    [{low:>10}, {high:>10}] : {count:>8} {bar}")
 
     return "\n".join(lines)
 
