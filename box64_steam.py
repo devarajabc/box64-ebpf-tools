@@ -2138,6 +2138,17 @@ def main():
                 for addr, info in sorted_inv[:top_n]:
                     print(f"  0x{addr:016x}  {info['count']:>14}  {info['isize']:>6}  0x{info['last_hash']:08x}")
 
+            # Unprotect hot zones
+            if unprot_addrs:
+                sorted_unprot = sorted(unprot_addrs.items(), key=lambda x: x[1]["count"], reverse=True)
+                top_n = min(20, len(sorted_unprot))
+                print(f"\n  Top {top_n} Unprotected Addresses (unprotectDB hot zones):")
+                print(f"  {'Address':>18s}  {'Calls':>8s}  {'Total Size':>12s}  {'Dirty Marks':>11s}")
+                print(f"  {'-'*18}  {'-'*8}  {'-'*12}  {'-'*11}")
+                for addr, info in sorted_unprot[:top_n]:
+                    print(f"  0x{addr:016x}  {info['count']:>8}  "
+                          f"{fmt_size(info['total_size']):>12}  {info['mark_count']:>11}")
+
         # -- Live block snapshot via /proc/PID/mem --
         if not args.no_dynarec:
             jit_blocks_map = b["jit_blocks"]
