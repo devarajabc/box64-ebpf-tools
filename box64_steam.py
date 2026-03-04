@@ -17,6 +17,7 @@ from __future__ import print_function
 import argparse
 import os
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -42,6 +43,49 @@ def fmt_size(n):
             return f"{n:.1f} {unit}"
         n /= 1024.0
     return f"{n:.1f} TB"
+
+
+def fmt_ns(ns):
+    """Human-readable nanosecond duration."""
+    if ns < 1000:
+        return f"{ns}ns"
+    elif ns < 1_000_000:
+        return f"{ns/1000:.1f}us"
+    elif ns < 1_000_000_000:
+        return f"{ns/1_000_000:.1f}ms"
+    else:
+        return f"{ns/1_000_000_000:.2f}s"
+
+
+def format_log2_hist(hist_map, val_type="value"):
+    """Format a BPF log2 histogram from a BPF_HISTOGRAM map."""
+    lines = []
+    items = []
+    for k, v in hist_map.items():
+        if v.value > 0:
+            items.append((k.value, v.value))
+    items.sort()
+
+    if not items:
+        lines.append("    (empty)")
+        return "\n".join(lines)
+
+    max_count = max(v for _, v in items)
+    max_bar = 40
+
+    for bucket, count in items:
+        low = 1 << bucket
+        high = (1 << (bucket + 1)) - 1
+        bar_len = int(count * max_bar / max_count) if max_count > 0 else 0
+        bar = "#" * bar_len
+        if val_type == "ns":
+            lines.append(f"    [{fmt_ns(low):>10s}, {fmt_ns(high):>10s}] : {count:>8} {bar}")
+        elif val_type == "bytes":
+            lines.append(f"    [{fmt_size(low):>10s}, {fmt_size(high):>10s}] : {count:>8} {bar}")
+        else:
+            lines.append(f"    [{low:>10}, {high:>10}] : {count:>8} {bar}")
+
+    return "\n".join(lines)
 
 
 def check_binary(path):
@@ -138,6 +182,47 @@ def read_proc_cmdline(pid):
     return f"pid{pid}"
 
 
+def read_block_metadata(pid, alloc_addr):
+    """Read dynablock_t metadata via /proc/PID/mem.
+
+    alloc_addr is the actual_block pointer returned by AllocDynarecMap.
+    Layout: *(dynablock_t**)alloc_addr = pointer to dynablock_t struct.
+    """
+    try:
+        with open(f"/proc/{pid}/mem", "rb") as f:
+            # Read dynablock_t* from *(void**)alloc_addr
+            f.seek(alloc_addr)
+            db_ptr = struct.unpack("Q", f.read(8))[0]
+            if db_ptr == 0:
+                return None
+            # Read a contiguous chunk from offset 0x18 to 0x50 (56 bytes)
+            # to minimize seeks
+            f.seek(db_ptr + 0x18)
+            data = f.read(0x50 - 0x18)  # 56 bytes
+            if len(data) < 0x50 - 0x18:
+                return None
+            in_used = struct.unpack_from("I", data, 0x00)[0]        # 0x18
+            tick = struct.unpack_from("I", data, 0x04)[0]           # 0x1c
+            x64_addr = struct.unpack_from("Q", data, 0x08)[0]      # 0x20
+            x64_size = struct.unpack_from("Q", data, 0x10)[0]      # 0x28
+            native_size = struct.unpack_from("Q", data, 0x18)[0]   # 0x30
+            # 0x38: prefixsize (skip), 0x3c: size
+            total_size = struct.unpack_from("i", data, 0x24)[0]    # 0x3c
+            hash_val = struct.unpack_from("I", data, 0x28)[0]      # 0x40
+            done, gone, dirty, flags_byte = struct.unpack_from("BBBB", data, 0x2c)  # 0x44-0x47
+            isize = struct.unpack_from("i", data, 0x34)[0]         # 0x4c
+            return {
+                "tick": tick, "in_used": in_used,
+                "x64_addr": x64_addr, "x64_size": x64_size,
+                "native_size": native_size, "total_size": total_size,
+                "hash": hash_val, "isize": isize,
+                "done": done, "gone": gone, "dirty": dirty,
+                "always_test": flags_byte & 0x3,
+            }
+    except (OSError, struct.error):
+        return None
+
+
 def _clear_stale_uprobes(binary):
     """Clear stale uprobe events and force a fresh inode for the binary.
 
@@ -227,12 +312,29 @@ static inline struct proc_mem_t *get_or_init_proc_mem(u32 pid) {
 // [10]=mmap_count   [11]=munmap_count [12]=box_mmap_count [13]=box_munmap_count
 // [14]=fork_count   [15]=vfork_count  [16]=exec_count     [17]=posix_spawn_count
 // [18]=context_new  [19]=context_free [20]=pressure_vessel_count
-BPF_ARRAY(steam_stats, u64, 21);
+// [21]=jit_churn_count  [22]=jit_outstanding_bytes
+// [23]=protect_calls  [24]=unprotect_calls  [25]=setprot_calls
+// [26]=protect_bytes  [27]=unprotect_bytes  [28]=setprot_bytes
+// [29]=invalidation_count  [30]=mark_dirty_count
+// [31]=jit_outstanding_blocks
+BPF_ARRAY(steam_stats, u64, 32);
 
 static inline void inc_stat(int idx, u64 val) {
     int key = idx;
     u64 *v = steam_stats.lookup(&key);
     if (v) __sync_fetch_and_add(v, val);
+}
+
+static inline void dec_stat(int idx, u64 val) {
+    int key = idx;
+    u64 *v = steam_stats.lookup(&key);
+    if (v) __sync_fetch_and_sub(v, val);
+}
+
+static inline int log2_u64(u64 v) {
+    int r = 0;
+    while (v >>= 1) r++;
+    return r;
 }
 
 // ---- Lifecycle event perf output ----
@@ -284,9 +386,64 @@ BPF_HASH(jit_pending, u64, struct jit_pending_t);
 
 struct jit_block_t {
     u64 size;
+    u64 x64_addr;
+    u64 alloc_ns;
     u32 pid;
+    u32 tid;
+    int is_new;
 };
 BPF_HASH(jit_blocks, u64, struct jit_block_t, HASH_CAPACITY);
+
+struct churn_event_t {
+    u64 x64_addr;
+    u64 alloc_addr;
+    u64 size;
+    u64 lifetime_ns;
+    u32 pid;
+};
+BPF_PERF_OUTPUT(churn_events);
+BPF_HISTOGRAM(alloc_sizes, int, 64);
+BPF_HISTOGRAM(block_lifetimes, int, 64);
+
+#ifdef TRACK_BLOCK_DETAIL
+struct block_death_event_t {
+    u64  x64_addr;
+    u64  alloc_addr;
+    u64  x64_size;
+    u64  native_size;
+    u64  lifetime_ns;
+    u32  tick;
+    u32  hash;
+    u32  isize;
+    u32  pid;
+    u8   dirty;
+    u8   always_test;
+    u8   gone;
+    u8   is_new;
+};
+BPF_PERF_OUTPUT(block_death_events);
+
+struct invalidation_event_t {
+    u64  x64_addr;
+    u64  x64_size;
+    u32  hash;
+    u32  isize;
+    u32  tick;
+    u32  pid;
+};
+BPF_PERF_OUTPUT(invalidation_events);
+
+struct unprot_event_t {
+    u64  addr;
+    u64  size;
+    u32  pid;
+    u8   mark;
+};
+BPF_PERF_OUTPUT(unprot_events);
+
+BPF_HISTOGRAM(death_isizes, int, 64);
+BPF_HISTOGRAM(death_native_sizes, int, 64);
+#endif /* TRACK_BLOCK_DETAIL */
 #endif
 
 #ifdef TRACK_MMAP
@@ -829,7 +986,13 @@ int jit_alloc_return(struct pt_regs *ctx) {
     u64 alloc_addr = PT_REGS_RC(ctx);
     if (alloc_addr != 0) {
         u32 pid = get_pid();
-        struct jit_block_t blk = { .size = p->size, .pid = pid };
+        struct jit_block_t blk = {};
+        blk.size     = p->size;
+        blk.x64_addr = p->x64_addr;
+        blk.alloc_ns = bpf_ktime_get_ns();
+        blk.pid      = pid;
+        blk.tid      = (u32)tid;
+        blk.is_new   = p->is_new;
         jit_blocks.update(&alloc_addr, &blk);
 
         struct proc_mem_t *pm = get_or_init_proc_mem(pid);
@@ -839,6 +1002,14 @@ int jit_alloc_return(struct pt_regs *ctx) {
         }
         inc_stat(6, 1);
         inc_stat(8, p->size);
+        inc_stat(22, p->size);  // outstanding_bytes
+        inc_stat(31, 1);        // outstanding_blocks
+
+        int bucket = log2_u64(p->size);
+        alloc_sizes.atomic_increment(bucket);
+#ifdef TRACK_THREADS
+        update_thread_alloc(p->size);
+#endif
     }
 
     jit_pending.delete(&tid);
@@ -863,12 +1034,183 @@ int jit_free_entry(struct pt_regs *ctx) {
         }
         inc_stat(7, 1);
         inc_stat(9, blk->size);
+        dec_stat(22, blk->size);  // outstanding_bytes
+        dec_stat(31, 1);          // outstanding_blocks
+
+        // Lifetime histogram
+        u64 now = bpf_ktime_get_ns();
+        u64 lifetime = now - blk->alloc_ns;
+        int lt_bucket = log2_u64(lifetime);
+        block_lifetimes.atomic_increment(lt_bucket);
+
+        // Churn detection
+        u64 churn_ns = CHURN_THRESHOLD_NS;
+        if (lifetime < churn_ns) {
+            inc_stat(21, 1);  // jit_churn_count
+
+            struct churn_event_t evt = {};
+            evt.x64_addr    = blk->x64_addr;
+            evt.alloc_addr  = addr;
+            evt.size        = blk->size;
+            evt.lifetime_ns = lifetime;
+            evt.pid         = blk->pid;
+            churn_events.perf_submit(ctx, &evt, sizeof(evt));
+        }
+
+#ifdef TRACK_THREADS
+        update_thread_free(blk->size);
+#endif
         jit_blocks.delete(&addr);
     }
     return 0;
 }
 
+#ifdef TRACK_BLOCK_DETAIL
+
+// ---- FreeDynablock(dynablock_t* db, int need_lock, int need_remove) ----
+// dynablock_t offsets:
+//   0x08: actual_block (void*)
+//   0x1c: tick (u32)
+//   0x20: x64_addr (void*)
+//   0x28: x64_size (u64)
+//   0x30: native_size (u64)
+//   0x40: hash (u32)
+//   0x44: done (u8), 0x45: gone (u8), 0x46: dirty (u8), 0x47: always_test (u8 bitfield)
+//   0x4c: isize (i32)
+int freedynablock_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    u64 db_ptr = PT_REGS_PARM1(ctx);
+    if (db_ptr == 0) return 0;
+
+    struct block_death_event_t evt = {};
+    evt.pid = get_pid();
+
+    // Read fields from dynablock_t
+    bpf_probe_read_user(&evt.tick, sizeof(evt.tick), (void*)(db_ptr + 0x1c));
+    bpf_probe_read_user(&evt.x64_addr, sizeof(evt.x64_addr), (void*)(db_ptr + 0x20));
+    bpf_probe_read_user(&evt.x64_size, sizeof(evt.x64_size), (void*)(db_ptr + 0x28));
+    bpf_probe_read_user(&evt.native_size, sizeof(evt.native_size), (void*)(db_ptr + 0x30));
+    bpf_probe_read_user(&evt.hash, sizeof(evt.hash), (void*)(db_ptr + 0x40));
+    bpf_probe_read_user(&evt.dirty, sizeof(evt.dirty), (void*)(db_ptr + 0x46));
+    u8 flags_byte = 0;
+    bpf_probe_read_user(&flags_byte, sizeof(flags_byte), (void*)(db_ptr + 0x47));
+    evt.always_test = flags_byte & 0x3;
+    bpf_probe_read_user(&evt.gone, sizeof(evt.gone), (void*)(db_ptr + 0x45));
+    bpf_probe_read_user(&evt.isize, sizeof(evt.isize), (void*)(db_ptr + 0x4c));
+
+    // Read actual_block to look up our jit_blocks map
+    u64 actual_block = 0;
+    bpf_probe_read_user(&actual_block, sizeof(actual_block), (void*)(db_ptr + 0x08));
+    evt.alloc_addr = actual_block;
+
+    // Try to get lifetime from our tracking
+    struct jit_block_t *blk = jit_blocks.lookup(&actual_block);
+    if (blk) {
+        u64 now = bpf_ktime_get_ns();
+        evt.lifetime_ns = now - blk->alloc_ns;
+        evt.is_new = (u8)blk->is_new;
+    }
+
+    // Histograms
+    if (evt.isize > 0) {
+        int is_bucket = log2_u64((u64)evt.isize);
+        death_isizes.atomic_increment(is_bucket);
+    }
+    if (evt.native_size > 0) {
+        int ns_bucket = log2_u64(evt.native_size);
+        death_native_sizes.atomic_increment(ns_bucket);
+    }
+
+    block_death_events.perf_submit(ctx, &evt, sizeof(evt));
+    return 0;
+}
+
+// ---- InvalidDynablock(dynablock_t* db, int need_lock) ----
+int invaliddynablock_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    u64 db_ptr = PT_REGS_PARM1(ctx);
+    if (db_ptr == 0) return 0;
+
+    inc_stat(29, 1);  // invalidation_count
+
+    struct invalidation_event_t evt = {};
+    evt.pid = get_pid();
+    bpf_probe_read_user(&evt.x64_addr, sizeof(evt.x64_addr), (void*)(db_ptr + 0x20));
+    bpf_probe_read_user(&evt.x64_size, sizeof(evt.x64_size), (void*)(db_ptr + 0x28));
+    bpf_probe_read_user(&evt.hash, sizeof(evt.hash), (void*)(db_ptr + 0x40));
+    bpf_probe_read_user(&evt.isize, sizeof(evt.isize), (void*)(db_ptr + 0x4c));
+    bpf_probe_read_user(&evt.tick, sizeof(evt.tick), (void*)(db_ptr + 0x1c));
+
+    invalidation_events.perf_submit(ctx, &evt, sizeof(evt));
+    return 0;
+}
+
+// ---- MarkDynablock(dynablock_t* db) ----
+int markdynablock_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    inc_stat(30, 1);  // mark_dirty_count
+    return 0;
+}
+
+#endif /* TRACK_BLOCK_DETAIL */
+
 #endif /* TRACK_DYNAREC */
+
+
+// =========================================================================
+// Protection Probes (TRACK_PROT)
+// =========================================================================
+#ifdef TRACK_PROT
+
+// void protectDB(uintptr_t addr, uintptr_t size)
+int protect_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    inc_stat(23, 1);
+    u64 size = PT_REGS_PARM2(ctx);
+    inc_stat(26, size);
+    return 0;
+}
+
+// void unprotectDB(uintptr_t addr, size_t size, int mark)
+int unprotect_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    inc_stat(24, 1);
+    u64 size = PT_REGS_PARM2(ctx);
+    inc_stat(27, size);
+
+#ifdef TRACK_BLOCK_DETAIL
+    struct unprot_event_t evt = {};
+    evt.addr = PT_REGS_PARM1(ctx);
+    evt.size = size;
+    evt.pid = get_pid();
+    evt.mark = (u8)PT_REGS_PARM3(ctx);
+    unprot_events.perf_submit(ctx, &evt, sizeof(evt));
+#endif
+    return 0;
+}
+
+// void setProtection(uintptr_t addr, size_t size, uint32_t prot)
+int setprot_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    inc_stat(25, 1);
+    u64 size = PT_REGS_PARM2(ctx);
+    inc_stat(28, size);
+    return 0;
+}
+
+#endif /* TRACK_PROT */
 
 
 // =========================================================================
@@ -1173,6 +1515,12 @@ def parse_args():
                    help="Disable thread/process lifecycle tracking")
     p.add_argument("--no-cow", action="store_true",
                    help="Disable Copy-on-Write page fault tracking (kprobe + /proc sampling)")
+    p.add_argument("--no-prot", action="store_true",
+                   help="Skip protectDB/unprotectDB/setProtection tracking (default: on when dynarec enabled)")
+    p.add_argument("--no-block-detail", action="store_true",
+                   help="Skip FreeDynablock/InvalidDynablock/MarkDynablock probes (reduce overhead)")
+    p.add_argument("--churn-threshold", type=float, default=1.0,
+                   help="JIT blocks freed within N seconds count as churn (default: 1.0)")
     p.add_argument("--hash-capacity", type=int, default=524288,
                    help="BPF hash table capacity for outstanding alloc tracking (default: 524288)")
     return p.parse_args()
@@ -1221,6 +1569,26 @@ def main():
             print(f"WARNING: DynaRec symbols missing: {', '.join(missing_jit)}; disabling JIT tracking.")
             args.no_dynarec = True
 
+    # Protection symbols (only when dynarec is enabled)
+    track_prot = False
+    if not args.no_dynarec and not args.no_prot:
+        prot_syms = ["protectDB", "unprotectDB", "setProtection"]
+        missing_prot = check_symbols_soft(binary, prot_syms)
+        if missing_prot:
+            print(f"WARNING: protection symbols not found: {', '.join(missing_prot)}; disabling protection tracking.")
+        else:
+            track_prot = True
+
+    # Block detail symbols (FreeDynablock, InvalidDynablock, MarkDynablock)
+    track_block_detail = False
+    if not args.no_dynarec and not args.no_block_detail:
+        detail_syms = ["FreeDynablock", "InvalidDynablock", "MarkDynablock"]
+        missing_detail = check_symbols_soft(binary, detail_syms)
+        if missing_detail:
+            print(f"WARNING: block detail symbols not found: {', '.join(missing_detail)}; disabling block detail tracking.")
+        else:
+            track_block_detail = True
+
     # Mmap symbols
     if not args.no_mmap:
         mmap_syms = ["InternalMmap", "InternalMunmap", "box_mmap", "box_munmap"]
@@ -1244,13 +1612,18 @@ def main():
 
     # Build cflags
     hash_cap = args.hash_capacity
-    cflags = [f"-DHASH_CAPACITY={hash_cap}"]
+    churn_ns = int(args.churn_threshold * 1_000_000_000)
+    cflags = [f"-DHASH_CAPACITY={hash_cap}", f"-DCHURN_THRESHOLD_NS={churn_ns}ULL"]
     if args.pid:
         cflags.append(f"-DFILTER_PID={args.pid}")
     if not args.no_mem:
         cflags.append("-DTRACK_MEM")
     if not args.no_dynarec:
         cflags.append("-DTRACK_DYNAREC")
+    if track_prot:
+        cflags.append("-DTRACK_PROT")
+    if track_block_detail:
+        cflags.append("-DTRACK_BLOCK_DETAIL")
     if not args.no_mmap:
         cflags.append("-DTRACK_MMAP")
     if track_threads:
@@ -1317,6 +1690,20 @@ def main():
         b.attach_uprobe(name=binary,    sym="FreeDynarecMap",  fn_name="jit_free_entry")
         probe_count += 3
 
+    # ---- Protection probes ----
+    if track_prot:
+        b.attach_uprobe(name=binary, sym="protectDB",      fn_name="protect_entry")
+        b.attach_uprobe(name=binary, sym="unprotectDB",    fn_name="unprotect_entry")
+        b.attach_uprobe(name=binary, sym="setProtection",  fn_name="setprot_entry")
+        probe_count += 3
+
+    # ---- Block detail probes ----
+    if track_block_detail:
+        b.attach_uprobe(name=binary, sym="FreeDynablock",    fn_name="freedynablock_entry")
+        b.attach_uprobe(name=binary, sym="InvalidDynablock", fn_name="invaliddynablock_entry")
+        b.attach_uprobe(name=binary, sym="MarkDynablock",    fn_name="markdynablock_entry")
+        probe_count += 3
+
     # ---- Mmap probes ----
     if not args.no_mmap:
         b.attach_uprobe(name=binary,    sym="InternalMmap",   fn_name="immap_entry")
@@ -1361,13 +1748,18 @@ def main():
         features.append("mem")
     if not args.no_dynarec:
         features.append("dynarec")
+    if track_prot:
+        features.append("prot")
+    if track_block_detail:
+        features.append("block_detail")
     if not args.no_mmap:
         features.append("mmap")
     if track_threads:
         features.append("threads")
     if track_cow:
         features.append("cow")
-    print(f"[*] {probe_count} probes attached{pid_str}. Features: {', '.join(features)}. "
+    churn_str = f" Churn threshold: {args.churn_threshold}s." if not args.no_dynarec else ""
+    print(f"[*] {probe_count} probes attached{pid_str}. Features: {', '.join(features)}.{churn_str} "
           f"Interval: {args.interval}s. Ctrl+C to stop.")
 
     # ---- Graceful exit ----
@@ -1504,14 +1896,72 @@ def main():
 
         b["thread_events"].open_perf_buffer(handle_thread_event, page_cnt=16)
 
+    # ---- Churn event handler ----
+    churned_x64_addrs = {}  # x64_addr -> count
+
+    if not args.no_dynarec:
+        def handle_churn_event(cpu, data, size):
+            evt = b["churn_events"].event(data)
+            addr = evt.x64_addr
+            churned_x64_addrs[addr] = churned_x64_addrs.get(addr, 0) + 1
+
+        b["churn_events"].open_perf_buffer(handle_churn_event, page_cnt=64)
+
+    # ---- Block detail event handlers ----
+    death_stats = {"count": 0, "tick_sum": 0, "isize_sum": 0, "native_size_sum": 0,
+                   "dirty_count": 0, "always_test_count": 0}
+    invalidation_addrs = {}   # x64_addr -> {"count": N, "isize": I, "last_hash": H}
+    unprot_addrs = {}         # addr -> {"count": N, "total_size": S, "mark_count": M}
+
+    if track_block_detail:
+        def handle_block_death_event(cpu, data, size):
+            evt = b["block_death_events"].event(data)
+            death_stats["count"] += 1
+            death_stats["tick_sum"] += evt.tick
+            death_stats["isize_sum"] += evt.isize
+            death_stats["native_size_sum"] += evt.native_size
+            if evt.dirty:
+                death_stats["dirty_count"] += 1
+            if evt.always_test:
+                death_stats["always_test_count"] += 1
+
+        b["block_death_events"].open_perf_buffer(handle_block_death_event, page_cnt=64)
+
+        def handle_invalidation_event(cpu, data, size):
+            evt = b["invalidation_events"].event(data)
+            addr = evt.x64_addr
+            entry = invalidation_addrs.get(addr)
+            if entry:
+                entry["count"] += 1
+                entry["last_hash"] = evt.hash
+            else:
+                invalidation_addrs[addr] = {"count": 1, "isize": evt.isize, "last_hash": evt.hash}
+
+        b["invalidation_events"].open_perf_buffer(handle_invalidation_event, page_cnt=16)
+
+        def handle_unprot_event(cpu, data, size):
+            evt = b["unprot_events"].event(data)
+            addr = evt.addr
+            entry = unprot_addrs.get(addr)
+            if entry:
+                entry["count"] += 1
+                entry["total_size"] += evt.size
+                if evt.mark:
+                    entry["mark_count"] += 1
+            else:
+                unprot_addrs[addr] = {"count": 1, "total_size": evt.size,
+                                      "mark_count": 1 if evt.mark else 0}
+
+        b["unprot_events"].open_perf_buffer(handle_unprot_event, page_cnt=16)
+
     # ---- Stats reading ----
     def read_stats():
         st = b["steam_stats"]
-        return [st[st.Key(i)].value for i in range(21)]
+        return [st[st.Key(i)].value for i in range(32)]
 
     # ---- Periodic summary ----
     def print_periodic(vals, prev_vals):
-        d = [vals[i] - prev_vals[i] for i in range(21)]
+        d = [vals[i] - prev_vals[i] for i in range(32)]
 
         print(f"\n--- {time.strftime('%H:%M:%S')} --- Box64+Steam ---")
         print(f"  fork: {d[14]:>6}  vfork: {d[15]:>6}  exec: {d[16]:>6}"
@@ -1522,8 +1972,26 @@ def main():
             print(f"  bytes_alloc: {fmt_size(d[4]):>10}  bytes_free: {fmt_size(d[5]):>10}")
 
         if not args.no_dynarec:
-            print(f"  jit_alloc: {d[6]:>8}  jit_free: {d[7]:>8}  "
-                  f"jit_alloc_bytes: {fmt_size(d[8]):>10}  jit_free_bytes: {fmt_size(d[9]):>10}")
+            churn_delta = d[21]
+            frees_delta = d[7]
+            churn_pct = (churn_delta / frees_delta * 100) if frees_delta > 0 else 0.0
+            detail_str = ""
+            if track_block_detail:
+                detail_str = f"  invalidated: {d[29]:>6}  marked_dirty: {d[30]:>6}"
+            print(f"  jit_alloc: {d[6]:>8}  jit_free: {frees_delta:>8}  churn: {churn_delta:>8} ({churn_pct:.1f}%){detail_str}")
+            print(f"  jit_alloc_bytes: {fmt_size(d[8]):>10}  jit_free_bytes: {fmt_size(d[9]):>10}  "
+                  f"outstanding: {fmt_size(vals[22]):>10}")
+            outstanding_blocks = vals[31]
+            print(f"  outstanding blocks: {outstanding_blocks}", end="")
+            if outstanding_blocks >= hash_cap:
+                print(f"  *** HASH TABLE FULL (capacity {hash_cap}) — data loss! Use --hash-capacity ***")
+            else:
+                print()
+
+        if track_prot:
+            print(f"  protectDB: {d[23]:>8} ({fmt_size(d[26]):>10})   "
+                  f"unprotectDB: {d[24]:>8} ({fmt_size(d[27]):>10})   "
+                  f"setProtection: {d[25]:>8} ({fmt_size(d[28]):>10})")
 
         if not args.no_mmap:
             print(f"  internal_mmap: {d[10]:>6}  internal_munmap: {d[11]:>6}  "
@@ -1580,9 +2048,258 @@ def main():
             print(f"    bytes allocated: {fmt_size(vals[4]):>12}   bytes freed: {fmt_size(vals[5]):>12}")
 
         if not args.no_dynarec:
+            churn_pct = (vals[21] / vals[7] * 100) if vals[7] > 0 else 0.0
             print(f"\n  DynaRec JIT Totals:")
-            print(f"    jit_alloc: {vals[6]:>10}   jit_free: {vals[7]:>10}")
-            print(f"    jit_alloc_bytes: {fmt_size(vals[8]):>12}   jit_free_bytes: {fmt_size(vals[9]):>12}")
+            print(f"    AllocDynarecMap:  {vals[6]:>12}")
+            print(f"    FreeDynarecMap:   {vals[7]:>12}")
+            print(f"    Churn (< {args.churn_threshold}s):   {vals[21]:>12}  ({churn_pct:.1f}%)")
+            print(f"    Bytes allocated:  {fmt_size(vals[8]):>12}")
+            print(f"    Bytes freed:      {fmt_size(vals[9]):>12}")
+            print(f"    Outstanding:      {fmt_size(vals[22]):>12}")
+
+        if track_prot:
+            print(f"\n  Protection Overhead:")
+            print(f"    protectDB:      {vals[23]:>10} calls, {fmt_size(vals[26]):>10} cumulative bytes")
+            print(f"    unprotectDB:    {vals[24]:>10} calls, {fmt_size(vals[27]):>10} cumulative bytes")
+            print(f"    setProtection:  {vals[25]:>10} calls, {fmt_size(vals[28]):>10} cumulative bytes")
+
+        if not args.no_dynarec:
+            # Allocation size histogram
+            print(f"\n  Allocation Size Distribution:")
+            print(format_log2_hist(b["alloc_sizes"], val_type="bytes"))
+
+            # Block lifetime histogram
+            print(f"\n  Block Lifetime Distribution:")
+            print(format_log2_hist(b["block_lifetimes"], val_type="ns"))
+
+            # Outstanding JIT blocks
+            jit_blocks_map = b["jit_blocks"]
+            outstanding = []
+            for k, v in jit_blocks_map.items():
+                outstanding.append((k.value, v.x64_addr, v.size, v.alloc_ns, v.pid, v.is_new))
+            outstanding.sort(key=lambda x: x[2], reverse=True)
+
+            print(f"\n  Outstanding JIT Blocks: {len(outstanding)}")
+            if len(outstanding) >= hash_cap:
+                print(f"  *** WARNING: Hash table was at capacity ({hash_cap}). Block tracking, lifetime,")
+                print(f"  *** and churn data may be incomplete. Re-run with --hash-capacity {hash_cap * 4}")
+            if outstanding:
+                top_n = min(20, len(outstanding))
+                print(f"  Top {top_n} by size:")
+                print(f"  {'AllocAddr':>18s}  {'x64Addr':>18s}  {'Size':>10s}  {'is_new':>6s}  {'PID':>7s}")
+                print(f"  {'-'*18}  {'-'*18}  {'-'*10}  {'-'*6}  {'-'*7}")
+                for i in range(top_n):
+                    aaddr, x64, sz, ts, pid, is_new = outstanding[i]
+                    print(f"  0x{aaddr:016x}  0x{x64:016x}  {fmt_size(sz):>10s}  {is_new:>6}  {pid:>7}")
+
+            # Top churned x64 addresses
+            if churned_x64_addrs:
+                sorted_churn = sorted(churned_x64_addrs.items(), key=lambda x: x[1], reverse=True)
+                top_n = min(20, len(sorted_churn))
+                print(f"\n  Top {top_n} Churned x64 Addresses (most frequently re-compiled):")
+                print(f"  {'x64 Address':>18s}  {'Churn Count':>12s}")
+                print(f"  {'-'*18}  {'-'*12}")
+                for i in range(top_n):
+                    addr, count = sorted_churn[i]
+                    print(f"  0x{addr:016x}  {count:>12}")
+
+        # -- Block detail analysis (FreeDynablock/InvalidDynablock/MarkDynablock) --
+        if track_block_detail:
+            print(f"\n  Block Detail Analysis:")
+            print(f"    Invalidations (InvalidDynablock):  {vals[29]:>10}")
+            print(f"    Dirty marks (MarkDynablock):       {vals[30]:>10}")
+
+            # Block death profile
+            if death_stats["count"] > 0:
+                dc = death_stats["count"]
+                avg_isize = death_stats["isize_sum"] / dc
+                avg_native = death_stats["native_size_sum"] / dc
+                print(f"\n  Freed Block Statistics (from FreeDynablock):")
+                print(f"    Total freed:          {dc:>12,}")
+                print(f"    Invalidated (hash):   {vals[29]:>12,}  "
+                      f"({vals[29]/dc*100:.1f}%)" if dc > 0 else "")
+                print(f"    Marked dirty:         {death_stats['dirty_count']:>12,}")
+                print(f"    Always_test set:      {death_stats['always_test_count']:>12,}")
+                print(f"    Avg isize at death:   {avg_isize:>12.1f} instructions")
+                print(f"    Avg native_size:      {fmt_size(int(avg_native)):>12}")
+
+                # Death isize histogram
+                print(f"\n  Freed Block Instruction Count Distribution:")
+                print(format_log2_hist(b["death_isizes"], val_type="value"))
+
+                # Death native size histogram
+                print(f"\n  Freed Block Native Size Distribution:")
+                print(format_log2_hist(b["death_native_sizes"], val_type="bytes"))
+
+            # Invalidation hot zones
+            if invalidation_addrs:
+                sorted_inv = sorted(invalidation_addrs.items(), key=lambda x: x[1]["count"], reverse=True)
+                top_n = min(20, len(sorted_inv))
+                print(f"\n  Top {top_n} Invalidated x64 Addresses:")
+                print(f"  {'x64 Address':>18s}  {'Invalidations':>14s}  {'isize':>6s}  {'Last Hash':>12s}")
+                print(f"  {'-'*18}  {'-'*14}  {'-'*6}  {'-'*12}")
+                for addr, info in sorted_inv[:top_n]:
+                    print(f"  0x{addr:016x}  {info['count']:>14}  {info['isize']:>6}  0x{info['last_hash']:08x}")
+
+            # Unprotect hot zones
+            if unprot_addrs:
+                sorted_unprot = sorted(unprot_addrs.items(), key=lambda x: x[1]["count"], reverse=True)
+                top_n = min(20, len(sorted_unprot))
+                print(f"\n  Top {top_n} Unprotected Addresses (unprotectDB hot zones):")
+                print(f"  {'Address':>18s}  {'Calls':>8s}  {'Total Size':>12s}  {'Dirty Marks':>11s}")
+                print(f"  {'-'*18}  {'-'*8}  {'-'*12}  {'-'*11}")
+                for addr, info in sorted_unprot[:top_n]:
+                    print(f"  0x{addr:016x}  {info['count']:>8}  "
+                          f"{fmt_size(info['total_size']):>12}  {info['mark_count']:>11}")
+
+        # -- Live block snapshot via /proc/PID/mem --
+        if not args.no_dynarec:
+            jit_blocks_map = b["jit_blocks"]
+            # Group blocks by PID for /proc/PID/mem access
+            blocks_by_pid = {}
+            for k, v in jit_blocks_map.items():
+                blocks_by_pid.setdefault(v.pid, []).append((k.value, v.size))
+
+            live_meta = []  # list of (pid, alloc_addr, size, metadata_dict)
+            for pid in sorted(blocks_by_pid.keys()):
+                mem_path = f"/proc/{pid}/mem"
+                try:
+                    with open(mem_path, "rb", buffering=0) as mem_f:
+                        for alloc_addr, blk_size in blocks_by_pid[pid]:
+                            meta = read_block_metadata(pid, alloc_addr, mem_f)
+                            if meta:
+                                live_meta.append((pid, alloc_addr, blk_size, meta))
+                except OSError:
+                    # Process may have exited or /proc/<pid>/mem may be unavailable.
+                    continue
+
+            if live_meta:
+                # Get max tick per process for age computation
+                max_tick_per_pid = {}
+                for pid, _, _, meta in live_meta:
+                    t = meta["tick"]
+                    if t > max_tick_per_pid.get(pid, 0):
+                        max_tick_per_pid[pid] = t
+
+                # Compute ages and collect stats
+                ages = []
+                isizes = []
+                native_sizes = []
+                x64_sizes = []
+                expansion_ratios = []
+                working_set = {100: {"count": 0, "bytes": 0},
+                               1000: {"count": 0, "bytes": 0},
+                               4096: {"count": 0, "bytes": 0}}
+                cold_count = 0
+                cold_bytes = 0
+                total_bytes = 0
+
+                for pid, alloc_addr, blk_size, meta in live_meta:
+                    max_t = max_tick_per_pid.get(pid, 0)
+                    age = max_t - meta["tick"] if max_t > meta["tick"] else 0
+                    ages.append(age)
+                    isizes.append(meta["isize"])
+                    native_sizes.append(meta["native_size"])
+                    x64_sizes.append(meta["x64_size"])
+                    ns = meta["native_size"]
+                    total_bytes += ns
+
+                    if meta["x64_size"] > 0:
+                        expansion_ratios.append(meta["native_size"] / meta["x64_size"])
+
+                    if meta["tick"] == 0:
+                        cold_count += 1
+                        cold_bytes += ns
+                    else:
+                        for threshold in (100, 1000, 4096):
+                            if age <= threshold:
+                                working_set[threshold]["count"] += 1
+                                working_set[threshold]["bytes"] += ns
+
+                # Block age histogram
+                print(f"\n  Live Block Age Distribution (max_tick - block_tick, per-process):")
+                age_buckets = {}
+                for age in ages:
+                    bucket = 0 if age == 0 else max(0, age.bit_length() - 1)
+                    age_buckets[bucket] = age_buckets.get(bucket, 0) + 1
+                if age_buckets:
+                    max_count = max(age_buckets.values())
+                    for bucket in sorted(age_buckets.keys()):
+                        low = 1 << bucket if bucket > 0 else 0
+                        high = (1 << (bucket + 1)) - 1 if bucket > 0 else 0
+                        count = age_buckets[bucket]
+                        bar_len = int(count * 40 / max_count) if max_count > 0 else 0
+                        bar = "#" * bar_len
+                        print(f"    [{low:>10}, {high:>10}] : {count:>8} {bar}")
+
+                # isize histogram (live blocks)
+                print(f"\n  Live Block Instruction Count Distribution:")
+                isize_buckets = {}
+                for isize in isizes:
+                    if isize > 0:
+                        bucket = max(0, isize.bit_length() - 1)
+                        isize_buckets[bucket] = isize_buckets.get(bucket, 0) + 1
+                if isize_buckets:
+                    max_count = max(isize_buckets.values())
+                    for bucket in sorted(isize_buckets.keys()):
+                        low = 1 << bucket
+                        high = (1 << (bucket + 1)) - 1
+                        count = isize_buckets[bucket]
+                        bar_len = int(count * 40 / max_count) if max_count > 0 else 0
+                        bar = "#" * bar_len
+                        print(f"    [{low:>10}, {high:>10}] : {count:>8} {bar}")
+
+                # Expansion ratio
+                if expansion_ratios:
+                    expansion_ratios.sort()
+                    avg_exp = sum(expansion_ratios) / len(expansion_ratios)
+                    med_exp = expansion_ratios[len(expansion_ratios) // 2]
+                    max_exp = expansion_ratios[-1]
+                    print(f"\n  Code Expansion Ratio (native_size / x64_size):")
+                    print(f"    avg: {avg_exp:.1f}x   median: {med_exp:.1f}x   max: {max_exp:.1f}x")
+
+                # Working set estimate
+                total_live = len(live_meta)
+                print(f"\n  Working Set Analysis:")
+                for threshold in (100, 1000, 4096):
+                    ws = working_set[threshold]
+                    pct = ws["count"] / total_live * 100 if total_live > 0 else 0
+                    print(f"    Blocks active in last {threshold:>5} ticks: "
+                          f"{ws['count']:>8,} ({pct:>4.0f}%)  using {fmt_size(ws['bytes']):>10}")
+                cold_pct = cold_count / total_live * 100 if total_live > 0 else 0
+                print(f"    Cold blocks (never executed):     "
+                      f"{cold_count:>8,} ({cold_pct:>4.0f}%)  using {fmt_size(cold_bytes):>10}")
+                print(f"    Total live blocks:                "
+                      f"{total_live:>8,}         using {fmt_size(total_bytes):>10}")
+
+                # Per-process cache summary
+                pid_summaries = {}
+                for pid, alloc_addr, blk_size, meta in live_meta:
+                    ps = pid_summaries.get(pid)
+                    if not ps:
+                        ps = {"count": 0, "bytes": 0, "tick_sum": 0, "ws100_count": 0, "ws100_bytes": 0}
+                        pid_summaries[pid] = ps
+                    ps["count"] += 1
+                    ps["bytes"] += meta["native_size"]
+                    ps["tick_sum"] += meta["tick"]
+                    max_t = max_tick_per_pid.get(pid, 0)
+                    age = max_t - meta["tick"] if max_t > meta["tick"] else 0
+                    if meta["tick"] > 0 and age <= 100:
+                        ps["ws100_count"] += 1
+                        ps["ws100_bytes"] += meta["native_size"]
+
+                if len(pid_summaries) > 1:
+                    print(f"\n  Per-Process Cache Summary:")
+                    print(f"  {'PID':>7s}  {'Label':>25s}  {'Live Blocks':>12s}  {'Cache Size':>10s}  "
+                          f"{'Avg Tick':>10s}  {'Working Set (100t)':>20s}")
+                    print(f"  {'-'*7}  {'-'*25}  {'-'*12}  {'-'*10}  {'-'*10}  {'-'*20}")
+                    for pid in sorted(pid_summaries.keys()):
+                        ps = pid_summaries[pid]
+                        label = pid_labels.get(pid, f"pid{pid}")[:25]
+                        avg_tick = ps["tick_sum"] / ps["count"] if ps["count"] > 0 else 0
+                        ws_str = f"{ps['ws100_count']:,} ({fmt_size(ps['ws100_bytes'])})"
+                        print(f"  {pid:>7}  {label:>25s}  {ps['count']:>12,}  {fmt_size(ps['bytes']):>10}  "
+                              f"{avg_tick:>10.0f}  {ws_str:>20s}")
 
         if not args.no_mmap:
             print(f"\n  Mmap Totals (box_mmap calls InternalMmap internally; counts overlap):")
