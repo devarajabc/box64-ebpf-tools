@@ -47,7 +47,7 @@ sudo python3 box64_dynarec.py [options]
 |------|---------|-------------|
 | `-b`, `--binary` | `/usr/local/bin/box64` | Path to the box64 binary |
 | `-p`, `--pid` | `0` (all) | Filter by PID; 0 traces all box64 processes |
-| `-i`, `--interval` | `10` | Periodic summary interval in seconds |
+| `-i`, `--interval` | `15` | Periodic summary interval in seconds |
 | `--no-prot` | off | Skip `protectDB`/`unprotectDB`/`setProtection` tracking (lower overhead) |
 | `--churn-threshold` | `1.0` | Blocks freed within this many seconds count as "churn" |
 | `--no-threads` | off | Disable thread/process lifecycle tracking (`pthread_create`, `fork`, `clone`) |
@@ -130,7 +130,7 @@ sudo python3 box64_memleak.py [options]
 |------|---------|-------------|
 | `-b`, `--binary` | `/usr/local/bin/box64` | Path to the box64 binary |
 | `-p`, `--pid` | `0` (all) | Filter by PID; 0 traces all box64 processes |
-| `-i`, `--interval` | `10` | Periodic summary interval in seconds |
+| `-i`, `--interval` | `15` | Periodic summary interval in seconds |
 | `-t`, `--top` | `20` | Number of top outstanding allocations to show in the final report |
 | `--mmap` | off | Also track `InternalMmap` / `InternalMunmap` |
 | `--stacks` | off | Capture user-space stack traces for each allocation (higher overhead) |
@@ -213,15 +213,17 @@ sudo python3 box64_steam.py [options]
 |------|---------|-------------|
 | `-b`, `--binary` | `/usr/local/bin/box64` | Path to the box64 binary |
 | `-p`, `--pid` | `0` (all) | Filter by PID; 0 traces all box64 processes |
-| `-i`, `--interval` | `10` | Periodic summary interval in seconds |
+| `-i`, `--interval` | `15` | Periodic summary interval in seconds |
 | `--no-mem` | off | Skip `customMalloc`/`customFree`/`customCalloc`/`customRealloc` tracking |
 | `--no-dynarec` | off | Skip `AllocDynarecMap`/`FreeDynarecMap` tracking (also disables churn/histogram/protection) |
 | `--no-prot` | off | Skip `protectDB`/`unprotectDB`/`setProtection` tracking (lower overhead; only when dynarec enabled) |
+| `--no-block-detail` | off | Skip `FreeDynablock`/`InvalidDynablock`/`MarkDynablock` tracking (requires dynarec enabled) |
 | `--churn-threshold` | `1.0` | JIT blocks freed within this many seconds count as "churn" |
 | `--no-mmap` | off | Skip `InternalMmap`/`InternalMunmap`/`box_mmap`/`box_munmap` tracking |
 | `--no-threads` | off | Disable thread/process lifecycle tracking |
 | `--no-cow` | off | Disable copy-on-write page fault tracking |
 | `--hash-capacity` | `524288` | BPF hash table size for outstanding allocation tracking |
+| `--sample-freq` | `0` (off) | PC sampling frequency in Hz; attaches perf event for JIT code profiling (requires `-p PID`) |
 
 ### Example
 
@@ -345,3 +347,29 @@ to force a new inode, and drops kernel caches. This is particularly relevant on
 All tools run `nm` and `nm -D` on the binary at startup to verify that all
 required symbols are present. If symbols are missing, you will get a clear
 error message indicating which symbols are needed and how to rebuild.
+
+## Development
+
+### Running tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v --tb=short --ignore=tests/test_upstream_compat.py
+```
+
+### Upstream compatibility tests
+
+Verify that upstream Box64's symbols, `dynablock_t` struct layout, and key
+function signatures still match what our tools expect:
+
+```bash
+BOX64_SRC_DIR=/path/to/box64 pytest tests/test_upstream_compat.py -v
+```
+
+### CI
+
+GitHub Actions runs on every push and PR (`.github/workflows/ci.yml`):
+
+- **`test`** — syntax check, ruff lint, unit tests (Python 3.10/3.11/3.12)
+- **`upstream-compat`** — shallow-clones upstream Box64 and checks symbol
+  existence, `dynablock_t` struct offsets, and key function parameter counts
