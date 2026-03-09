@@ -54,9 +54,24 @@ sudo pacman -S python-bcc bcc-tools              # Arch
 
 Box64 must be built with debug symbols (`-DCMAKE_BUILD_TYPE=RelWithDebInfo`) and not stripped.
 
-## No Tests or CI
+## Testing and CI
 
-There are no automated tests or CI pipelines. Testing is manual — run tools against live Box64 processes.
+Unit tests live in `tests/` and run with pytest:
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v --tb=short --ignore=tests/test_upstream_compat.py
+```
+
+Upstream compatibility tests verify that Box64's symbols, struct layouts, and function signatures haven't changed:
+```bash
+BOX64_SRC_DIR=/path/to/box64 pytest tests/test_upstream_compat.py -v
+```
+
+CI runs on every push/PR via `.github/workflows/ci.yml`:
+- **`test` job** — syntax check, ruff lint, unit tests (Python 3.10/3.11/3.12 matrix)
+- **`upstream-compat` job** — shallow-clones upstream Box64, checks symbol existence, `dynablock_t` struct offsets, and key function parameter counts
+
+eBPF-level testing is manual — run tools against live Box64 processes.
 
 ## Technical Reference
 
