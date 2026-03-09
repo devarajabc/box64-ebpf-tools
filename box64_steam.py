@@ -1749,7 +1749,7 @@ def main():
 
     # sched_process_fork tracepoint for parent->child PID mapping
     try:
-        b.attach_tracepoint(tp="sched:sched_process_fork", fn_name="trace_fork")
+        b.attach_tracepoint(tp="sched:sched_process_fork", fn_name="sched__sched_process_fork")
         probe_count += 1
     except Exception as e:
         print(f"WARNING: sched_process_fork tracepoint unavailable: {e}")
