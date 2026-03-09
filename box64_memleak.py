@@ -721,8 +721,8 @@ def parse_args():
                    help="Path to box64 binary (default: /usr/local/bin/box64)")
     p.add_argument("-p", "--pid", type=int, default=0,
                    help="Filter by PID (default: trace all box64 processes)")
-    p.add_argument("-i", "--interval", type=int, default=10,
-                   help="Summary interval in seconds (default: 10)")
+    p.add_argument("-i", "--interval", type=int, default=15,
+                   help="Summary interval in seconds (default: 15)")
     p.add_argument("-t", "--top", type=int, default=20,
                    help="Top N outstanding allocations to show (default: 20)")
     p.add_argument("--mmap", action="store_true",
