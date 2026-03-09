@@ -20,4 +20,20 @@ jobs:
       - name: Lint
         run: ruff check box64_dynarec.py box64_memleak.py box64_steam.py tests/
       - name: Unit tests
-        run: pytest tests/ -v --tb=short
+        run: pytest tests/ -v --tb=short --ignore=tests/test_upstream_compat.py
+
+  upstream-compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Clone upstream Box64 (shallow)
+        run: git clone --depth=1 https://github.com/ptitSeb/box64.git /tmp/box64
+      - name: Check upstream compatibility
+        env:
+          BOX64_SRC_DIR: /tmp/box64
+        run: pytest tests/test_upstream_compat.py -v --tb=short
