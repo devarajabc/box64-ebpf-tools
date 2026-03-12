@@ -293,12 +293,13 @@ def _clear_stale_uprobes(binary):
 
 
 def _patch_bcc_uretprobe():
-    """Fix BCC 0.29.1 aarch64 bug: lib.bpf_attach_uprobe missing 7th arg.
+    """Work around an aarch64 BCC bug where lib.bpf_attach_uprobe is defined
+    with only 6 arguments (missing the ref_ctr_offset parameter).
 
     On aarch64, the missing ref_ctr_offset parameter picks up garbage from
     register x6, corrupting perf_event_attr.config and causing EINVAL when
     a uprobe and uretprobe target the same symbol. This monkey-patches the
-    ctypes binding to always pass ref_ctr_offset=0.
+    ctypes binding to always pass ref_ctr_offset=0 for such 6-arg bindings.
     """
     import platform
     if platform.machine() != "aarch64":
