@@ -2,9 +2,17 @@
 import ctypes as ct
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import box64_steam
 import box64_dynarec
 import box64_memleak
+
+ALL_MODULES = [
+    pytest.param(box64_dynarec, id="box64_dynarec"),
+    pytest.param(box64_memleak, id="box64_memleak"),
+    pytest.param(box64_steam, id="box64_steam"),
+]
 
 
 def _reset_lib():
@@ -17,33 +25,20 @@ def _reset_lib():
 class TestPatchOnAarch64:
     """When platform.machine() == 'aarch64', the patch should activate."""
 
+    @pytest.mark.parametrize("module", ALL_MODULES)
     @patch("platform.machine", return_value="aarch64")
-    def test_steam_replaces_attach_uprobe(self, _mock_machine):
+    def test_replaces_attach_uprobe(self, _mock_machine, module):
         lib = _reset_lib()
         original = lib.bpf_attach_uprobe
-        box64_steam._patch_bcc_uretprobe()
-        # The function should have been replaced
+        module._patch_bcc_uretprobe()
         assert lib.bpf_attach_uprobe is not original
 
+    @pytest.mark.parametrize("module", ALL_MODULES)
     @patch("platform.machine", return_value="aarch64")
-    def test_dynarec_replaces_attach_uprobe(self, _mock_machine):
+    def test_wrapper_appends_ref_ctr_offset(self, _mock_machine, module):
         lib = _reset_lib()
         original = lib.bpf_attach_uprobe
-        box64_dynarec._patch_bcc_uretprobe()
-        assert lib.bpf_attach_uprobe is not original
-
-    @patch("platform.machine", return_value="aarch64")
-    def test_memleak_replaces_attach_uprobe(self, _mock_machine):
-        lib = _reset_lib()
-        original = lib.bpf_attach_uprobe
-        box64_memleak._patch_bcc_uretprobe()
-        assert lib.bpf_attach_uprobe is not original
-
-    @patch("platform.machine", return_value="aarch64")
-    def test_wrapper_appends_ref_ctr_offset(self, _mock_machine):
-        lib = _reset_lib()
-        original = lib.bpf_attach_uprobe
-        box64_steam._patch_bcc_uretprobe()
+        module._patch_bcc_uretprobe()
         patched = lib.bpf_attach_uprobe
         # Call with 6 args (what BCC normally passes)
         patched(1, 2, b"name", b"/path", 0x100, -1)
@@ -53,11 +48,12 @@ class TestPatchOnAarch64:
         assert len(args) == 7
         assert args[6].value == 0  # ct.c_uint32(0)
 
+    @pytest.mark.parametrize("module", ALL_MODULES)
     @patch("platform.machine", return_value="aarch64")
-    def test_wrapper_passes_through_7_args(self, _mock_machine):
+    def test_wrapper_passes_through_7_args(self, _mock_machine, module):
         lib = _reset_lib()
         original = lib.bpf_attach_uprobe
-        box64_steam._patch_bcc_uretprobe()
+        module._patch_bcc_uretprobe()
         patched = lib.bpf_attach_uprobe
         # If already 7 args, pass through unchanged
         patched(1, 2, b"name", b"/path", 0x100, -1, ct.c_uint32(42))
@@ -69,25 +65,12 @@ class TestPatchOnAarch64:
 class TestPatchOnNonAarch64:
     """On non-aarch64, the patch should be a no-op."""
 
+    @pytest.mark.parametrize("module", ALL_MODULES)
     @patch("platform.machine", return_value="x86_64")
-    def test_steam_noop_on_x86_64(self, _mock_machine):
+    def test_noop_on_x86_64(self, _mock_machine, module):
         lib = _reset_lib()
         original = lib.bpf_attach_uprobe
-        box64_steam._patch_bcc_uretprobe()
-        assert lib.bpf_attach_uprobe is original
-
-    @patch("platform.machine", return_value="x86_64")
-    def test_dynarec_noop_on_x86_64(self, _mock_machine):
-        lib = _reset_lib()
-        original = lib.bpf_attach_uprobe
-        box64_dynarec._patch_bcc_uretprobe()
-        assert lib.bpf_attach_uprobe is original
-
-    @patch("platform.machine", return_value="x86_64")
-    def test_memleak_noop_on_x86_64(self, _mock_machine):
-        lib = _reset_lib()
-        original = lib.bpf_attach_uprobe
-        box64_memleak._patch_bcc_uretprobe()
+        module._patch_bcc_uretprobe()
         assert lib.bpf_attach_uprobe is original
 
 
