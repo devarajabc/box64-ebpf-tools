@@ -11,6 +11,12 @@ _bcc.PerfType = MagicMock()
 _bcc.PerfSWConfig = MagicMock()
 sys.modules["bcc"] = _bcc
 
+# Mock bcc.libbcc with a fake lib.bpf_attach_uprobe
+_libbcc = types.ModuleType("bcc.libbcc")
+_libbcc.lib = MagicMock()
+_bcc.libbcc = _libbcc
+sys.modules["bcc.libbcc"] = _libbcc
+
 # Add repo root to sys.path so `import box64_dynarec` etc. work
 from pathlib import Path
 
