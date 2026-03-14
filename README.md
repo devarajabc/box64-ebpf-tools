@@ -7,6 +7,116 @@ internal functions at runtime with minimal overhead and no recompilation.
 - **box64_memleak.py** -- Memory leak detection for Box64's custom allocator
 - **box64_steam.py** -- Multi-process Steam tracer (fork/exec lifecycle, per-PID memory, DynaRec JIT analysis with churn/lifetime/protection tracking, mmap, pressure-vessel detection)
 
+## Getting Started
+
+### 1. Install BCC
+
+Install the BCC toolkit using your distribution's package manager (see [Prerequisites](#prerequisites) for full details):
+
+```bash
+# Debian/Ubuntu/Raspberry Pi OS
+sudo apt install python3-bcc bpfcc-tools
+```
+
+### 2. Build Box64 with debug symbols
+
+The tools attach to Box64's internal functions by name, so the binary **must** have debug symbols and must not be stripped:
+
+```bash
+git clone https://github.com/ptitSeb/box64.git
+cd box64 && mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo -DARM_DYNAREC=ON
+make -j$(nproc)
+sudo make install
+```
+
+### 3. Clone this repository
+
+```bash
+git clone https://github.com/devarajabc/box64-ebpf-tools.git
+cd box64-ebpf-tools
+```
+
+### 4. Pick the right tool
+
+| Goal | Tool | Command |
+|------|------|---------|
+| Analyze JIT block churn and lifetimes | `box64_dynarec.py` | `sudo python3 box64_dynarec.py -p <PID>` |
+| Find memory leaks in Box64's allocator | `box64_memleak.py` | `sudo python3 box64_memleak.py -p <PID>` |
+| Profile a full Steam gaming session | `box64_steam.py` | `sudo python3 box64_steam.py` |
+
+### 5. Run and collect data
+
+```bash
+# Start your Box64 workload (game, app, etc.) in one terminal,
+# then attach the profiler as root in another:
+sudo python3 box64_steam.py -p $(pidof box64)
+
+# The tool prints periodic summaries while running.
+# Press Ctrl+C when done to get the full report.
+```
+
+### 6. Read the report
+
+Each tool prints a comprehensive final report on Ctrl+C. Key things to look for:
+
+- **High churn rates** (dynarec/steam) -- JIT blocks being repeatedly compiled and freed, a sign of code that defeats the JIT cache.
+- **Outstanding allocations** (memleak) that grow over time -- potential memory leaks.
+- **Process tree** (steam) -- parent-child hierarchy of all box64 processes spawned during a Steam session.
+- **Histograms** -- distribution of allocation sizes and block lifetimes.
+
+## How It Works
+
+Each tool follows the same process:
+
+1. **CLI args** -- parsed with `argparse`. Common flags: `-b BINARY`, `-p PID`, `-i INTERVAL`.
+2. **Symbol validation** -- runs `nm`/`nm -D` on the Box64 binary to verify required symbols exist. Optional features are auto-disabled if their symbols are missing.
+3. **BPF program compilation** -- C source embedded in Python is compiled by BCC at runtime with `#define` flags for conditional feature gating.
+4. **Probe attachment** -- uprobes/uretprobes attach to Box64 functions at runtime. No recompilation or restart needed. Optional kprobes attach to kernel functions (e.g., `wp_page_copy` for CoW tracking).
+5. **Event loop** -- periodic interval summaries print while the tool runs (+ perf event buffer polling when enabled).
+6. **Final report** -- press Ctrl+C to get the comprehensive output: histograms, top-N lists, process trees, timelines.
+
+## Typical Workflows
+
+### Investigating a game that uses too much memory
+
+1. Launch the game through Steam/Box64.
+2. Run `sudo python3 box64_steam.py` to get a full session overview -- it tracks all box64 processes automatically.
+3. Check the periodic summaries for which PID is growing fastest.
+4. If you suspect a leak, run `sudo python3 box64_memleak.py -p <PID> --stacks` on that specific process to get per-allocation stack traces.
+5. If you suspect JIT thrashing, run `sudo python3 box64_dynarec.py -p <PID> --churn-threshold 0.5` to identify hot x64 addresses being repeatedly recompiled.
+
+### Quick single-process profiling
+
+```bash
+# Start box64 with your app
+box64 ./myapp &
+
+# Attach the dynarec profiler
+sudo python3 box64_dynarec.py -p $(pidof box64) -i 5
+
+# Let it run, then Ctrl+C for the report
+```
+
+### PC sampling profiling (finding hot x64 code)
+
+```bash
+# Sample at 99 Hz to find where the JIT spends time
+sudo python3 box64_steam.py -p $(pidof box64) --sample-freq 99
+```
+
+### Reducing overhead for production use
+
+```bash
+# Disable optional tracking to minimize probe count
+sudo python3 box64_steam.py --no-prot --no-threads --no-cow --no-block-detail
+```
+
+## Documentation
+
+- **[`docs/HOW_BOX64_WORKS.md`](docs/HOW_BOX64_WORKS.md)** -- Complete step-by-step walkthrough of how Box64 executes an x86_64 binary, from ELF loading through DynaRec JIT compilation to syscall translation.
+- **[`docs/BOX64_FORK_EXEC_MEMORY.md`](docs/BOX64_FORK_EXEC_MEMORY.md)** -- Technical reference for Box64's fork/exec/clone mechanisms, custom allocator (3-tier: 64B/128B slabs + linked-list), DynaRec JIT block management, and pressure-vessel Steam containers.
+
 ## Prerequisites
 
 - **Root access** (eBPF uprobes require `CAP_SYS_ADMIN`)
