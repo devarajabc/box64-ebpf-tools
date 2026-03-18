@@ -52,7 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install BCC
-        run: sudo apt-get update && sudo apt-get install -y python3-bcc
+        run: sudo apt-get update && sudo apt-get install -y python3-bpfcc
       - name: Test HIST_INCREMENT fallback compiles
         run: |
           sudo python3 -c "
