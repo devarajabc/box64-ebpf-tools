@@ -331,12 +331,34 @@ def _patch_bcc_uretprobe():
         print(f"WARNING: failed to patch BCC uretprobe binding: {e}")
 
 
+def _bcc_has_atomic_increment():
+    """Probe whether this BCC version supports table.atomic_increment()."""
+    try:
+        BPF(text=r"""
+            BPF_HISTOGRAM(t, int, 2);
+            int test(void *ctx) { int k = 0; t.atomic_increment(k); return 0; }
+        """)
+        return True
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # BPF C program
 # ---------------------------------------------------------------------------
 
 BPF_PROGRAM = r"""
 #include <uapi/linux/ptrace.h>
+
+// Histogram increment: uses atomic_increment on new BCC, falls back to
+// lookup_or_init + __sync_fetch_and_add on old BCC.
+#ifdef HAS_ATOMIC_INCREMENT
+  #define HIST_INCREMENT(table, key) table.atomic_increment(key)
+#else
+  #define HIST_INCREMENT(table, key) \
+      { u64 _zero = 0, *_val = table.lookup_or_init(&(key), &_zero); \
+        if (_val) __sync_fetch_and_add(_val, 1); }
+#endif
 
 // ---- Helpers ----
 
@@ -1084,7 +1106,7 @@ int jit_alloc_return(struct pt_regs *ctx) {
         inc_stat(31, 1);        // outstanding_blocks
 
         int bucket = log2_u64(p->size);
-        alloc_sizes.atomic_increment(bucket);
+        HIST_INCREMENT(alloc_sizes, bucket);
 #ifdef TRACK_THREADS
         update_thread_alloc(p->size);
 #endif
@@ -1119,7 +1141,7 @@ int jit_free_entry(struct pt_regs *ctx) {
         u64 now = bpf_ktime_get_ns();
         u64 lifetime = now - blk->alloc_ns;
         int lt_bucket = log2_u64(lifetime);
-        block_lifetimes.atomic_increment(lt_bucket);
+        HIST_INCREMENT(block_lifetimes, lt_bucket);
 
         // Churn detection
         u64 churn_ns = CHURN_THRESHOLD_NS;
@@ -1194,11 +1216,11 @@ int freedynablock_entry(struct pt_regs *ctx) {
     // Histograms
     if (evt.isize > 0) {
         int is_bucket = log2_u64((u64)evt.isize);
-        death_isizes.atomic_increment(is_bucket);
+        HIST_INCREMENT(death_isizes, is_bucket);
     }
     if (evt.native_size > 0) {
         int ns_bucket = log2_u64(evt.native_size);
-        death_native_sizes.atomic_increment(ns_bucket);
+        HIST_INCREMENT(death_native_sizes, ns_bucket);
     }
 
     block_death_events.perf_submit(ctx, &evt, sizeof(evt));
@@ -1752,6 +1774,8 @@ def main():
             sys.exit(1)
         cflags.append("-DTRACK_PROFILE")
         cflags.append(f"-DPROFILE_CAPACITY={hash_cap}")
+    if _bcc_has_atomic_increment():
+        cflags.append("-DHAS_ATOMIC_INCREMENT")
 
     # Clear stale uprobe events (Asahi Linux workaround)
     _clear_stale_uprobes(binary)

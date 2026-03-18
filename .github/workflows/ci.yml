@@ -19,8 +19,70 @@ jobs:
         run: python3 -m py_compile box64_dynarec.py box64_memleak.py box64_steam.py
       - name: Lint
         run: ruff check box64_dynarec.py box64_memleak.py box64_steam.py tests/
+      - name: Lint - no raw atomic_increment
+        run: |
+          python3 -c "
+          import re, sys
+          TOOLS = ['box64_dynarec.py', 'box64_memleak.py', 'box64_steam.py']
+          ALLOWED = [
+              r'#define HIST_INCREMENT.*atomic_increment',
+              r't\.atomic_increment',
+              r'table\.atomic_increment',
+              r'_bcc_has_atomic_increment',
+              r'// .*atomic_increment',
+              r'\".*atomic_increment',
+          ]
+          ok = True
+          for tool in TOOLS:
+              for i, line in enumerate(open(tool), 1):
+                  if 'atomic_increment' not in line:
+                      continue
+                  if any(re.search(p, line) for p in ALLOWED):
+                      continue
+                  print(f'ERROR {tool}:{i}: raw atomic_increment: {line.strip()}')
+                  ok = False
+          sys.exit(0 if ok else 1)
+          "
       - name: Unit tests
         run: pytest tests/ -v --tb=short --ignore=tests/test_upstream_compat.py
+
+  bcc-compat:
+    name: BCC fallback path compile test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install BCC
+        run: sudo apt-get update && sudo apt-get install -y python3-bcc
+      - name: Test HIST_INCREMENT fallback compiles
+        run: |
+          sudo python3 -c "
+          from bcc import BPF
+          BPF(text=r'''
+              #define HIST_INCREMENT(table, key) \
+                  { u64 _zero = 0, *_val = table.lookup_or_init(&(key), &_zero); \
+                    if (_val) __sync_fetch_and_add(_val, 1); }
+              BPF_HISTOGRAM(test_hist, int, 64);
+              int test(void *ctx) {
+                  int bucket = 3;
+                  HIST_INCREMENT(test_hist, bucket);
+                  return 0;
+              }
+          ''')
+          print('PASS: fallback path compiles')
+          "
+      - name: Test BCC detection probe
+        run: |
+          sudo python3 -c "
+          from bcc import BPF
+          try:
+              BPF(text=r'''
+                  BPF_HISTOGRAM(t, int, 2);
+                  int test(void *ctx) { int k=0; t.atomic_increment(k); return 0; }
+              ''')
+              print('PASS: this BCC supports atomic_increment')
+          except:
+              print('INFO: this BCC does not support atomic_increment (fallback will be used)')
+          "
 
   upstream-compat:
     runs-on: ubuntu-latest
