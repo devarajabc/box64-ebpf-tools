@@ -755,6 +755,9 @@ def fmt_ns(ns):
         return f"{ns/1_000_000_000:.2f}s"
 
 
+from box64_common import correlate_thread_parents, compute_cow_deltas, rank_items
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1005,19 +1008,18 @@ def main():
         outstanding = []
         for k, v in jit_blocks.items():
             outstanding.append((k.value, v.x64_addr, v.size, v.alloc_ns, v.pid, v.is_new))
-        outstanding.sort(key=lambda x: x[2], reverse=True)
-
         print(f"\n  Outstanding JIT blocks: {len(outstanding)}")
         if len(outstanding) >= hash_cap:
             print(f"  *** WARNING: Hash table was at capacity ({hash_cap}). Block tracking, lifetime,")
             print(f"  *** and churn data may be incomplete. Re-run with --hash-capacity {hash_cap * 4}")
         if outstanding:
-            top_n = min(20, len(outstanding))
+            ranked = rank_items(outstanding, sort_key_idx=2)
+            top_n = len(ranked)
             print(f"  Top {top_n} by size:")
             print(f"  {'AllocAddr':>18s}  {'x64Addr':>18s}  {'Size':>10s}  {'is_new':>6s}  {'PID':>7s}")
             print(f"  {'-'*18}  {'-'*18}  {'-'*10}  {'-'*6}  {'-'*7}")
             for i in range(top_n):
-                aaddr, x64, sz, ts, pid, is_new = outstanding[i]
+                aaddr, x64, sz, ts, pid, is_new = ranked[i]
                 print(f"  0x{aaddr:016x}  0x{x64:016x}  {fmt_size(sz):>10s}  {is_new:>6}  {pid:>7}")
 
         # Top churned x64 addresses
@@ -1057,29 +1059,8 @@ def main():
                 tid_stats[k.value] = (v.alloc_count, v.alloc_bytes)
 
             # --- Process/Thread Tree ---
-            # Deferred correlation: match create_requests with thread_started
-            # events using absolute timestamp proximity.  This handles
-            # out-of-order perf buffer delivery across CPUs.
-            unmatched = [t for t in thread_timeline if t not in thread_parent]
-            remaining_reqs = list(create_requests)
-            for tid in unmatched:
-                info = thread_timeline[tid]
-                pid = info.get("pid", 0)
-                create_ns = info.get("create_ns", 0)
-                if not pid or not create_ns:
-                    continue
-                best_idx = None
-                best_delta = float('inf')
-                for i, (ts, cr_tid, req_pid, req_fnc) in enumerate(remaining_reqs):
-                    if req_pid != pid:
-                        continue
-                    delta = abs(create_ns - ts)
-                    if delta < best_delta:
-                        best_delta = delta
-                        best_idx = i
-                if best_idx is not None and best_delta < 5_000_000_000:
-                    _, creator_tid, _, _ = remaining_reqs.pop(best_idx)
-                    thread_parent[tid] = creator_tid
+            correlate_thread_parents(thread_timeline, create_requests,
+                                     thread_parent)
 
             all_tids = set(thread_timeline.keys()) | set(tid_stats.keys())
 
@@ -1182,8 +1163,9 @@ def main():
                 for sample in cow_info["child_samples"]:
                     cs = sample["smaps"]
                     elapsed = sample["time"] - cow_info["snapshot_time"]
-                    delta_dirty = cs.get("Private_Dirty", 0) - ps.get("Private_Dirty", 0)
-                    delta_minflt = sample["minflt"] - cow_info["parent_minflt"]
+                    delta_dirty, delta_minflt = compute_cow_deltas(
+                        ps, cow_info["parent_minflt"],
+                        cs, sample["minflt"])
                     print(f"    Child PID {sample['pid']} (after {elapsed:.1f}s):")
                     print(f"      Private_Dirty: {fmt_size(cs.get('Private_Dirty', 0)):>10}"
                           f"  (+{fmt_size(delta_dirty)} CoW)")

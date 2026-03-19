@@ -29,15 +29,14 @@ class TestCheckBinary:
         with pytest.raises(SystemExit):
             module.check_binary("/nonexistent/box64")
 
-    def test_unreadable_file_exits(self, module, tmp_path):
+    def test_unreadable_file_exits(self, module, tmp_path, monkeypatch):
         f = tmp_path / "box64"
         f.write_bytes(b"\x7fELF")
-        f.chmod(0o000)
-        try:
-            with pytest.raises(SystemExit):
-                module.check_binary(str(f))
-        finally:
-            f.chmod(0o644)  # restore for cleanup
+        real_access = os.access
+        monkeypatch.setattr("os.access",
+                            lambda p, m: False if p == str(f) else real_access(p, m))
+        with pytest.raises(SystemExit):
+            module.check_binary(str(f))
 
     def test_directory_is_not_file(self, module, tmp_path):
         with pytest.raises(SystemExit):

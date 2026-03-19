@@ -778,6 +778,32 @@ def parse_args():
     return p.parse_args()
 
 
+from box64_common import correlate_thread_parents, compute_cow_deltas, rank_items
+
+
+# ---------------------------------------------------------------------------
+# Extracted testable functions
+# ---------------------------------------------------------------------------
+
+def compute_size_histogram(sizes):
+    """Bucket sizes into log2 ranges.
+
+    Args: sizes - list of ints
+    Returns: dict of bucket_label -> count
+    """
+    buckets = {}
+    for sz in sizes:
+        if sz == 0:
+            bucket = "0"
+        else:
+            bit = sz.bit_length() - 1
+            low = 1 << bit
+            high = (1 << (bit + 1)) - 1
+            bucket = f"{fmt_size(low)}-{fmt_size(high)}"
+        buckets[bucket] = buckets.get(bucket, 0) + 1
+    return buckets
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1017,8 +1043,6 @@ def main():
             items.append((k.value, v.size, v.timestamp_ns, v.pid, v.tid,
                           v.type, v.is32, v.stack_id))
 
-        items.sort(key=lambda x: x[1], reverse=True)
-
         total_outstanding = len(items)
         total_bytes = sum(x[1] for x in items)
         print(f"\n  Outstanding allocations: {total_outstanding}")
@@ -1032,18 +1056,7 @@ def main():
             return
 
         # Size distribution histogram
-        buckets = {}
-        for item in items:
-            sz = item[1]
-            if sz == 0:
-                bucket = "0"
-            else:
-                # log2 bucket
-                bit = sz.bit_length() - 1
-                low = 1 << bit
-                high = (1 << (bit + 1)) - 1
-                bucket = f"{fmt_size(low)}-{fmt_size(high)}"
-            buckets[bucket] = buckets.get(bucket, 0) + 1
+        buckets = compute_size_histogram([item[1] for item in items])
 
         print("\n  Size distribution:")
         for bucket, count in sorted(buckets.items()):
@@ -1051,7 +1064,8 @@ def main():
             print(f"    {bucket:>20s} : {count:>6} {bar}")
 
         # Top N
-        top_n = min(args.top, len(items))
+        ranked = rank_items(items, top_n=args.top, sort_key_idx=1)
+        top_n = len(ranked)
         print(f"\n  Top {top_n} outstanding allocations (by size):")
         print(f"  {'Ptr':>18s}  {'Size':>10s}  {'Age(s)':>8s}  {'Type':>8s}  {'32b':>3s}  {'PID':>7s}  {'TID':>7s}")
         print(f"  {'-'*18}  {'-'*10}  {'-'*8}  {'-'*8}  {'-'*3}  {'-'*7}  {'-'*7}")
@@ -1062,7 +1076,7 @@ def main():
             max_ts = max(x[2] for x in items)
 
         for i in range(top_n):
-            ptr, size, ts, pid, tid, atype, is32, stack_id = items[i]
+            ptr, size, ts, pid, tid, atype, is32, stack_id = ranked[i]
             age_s = (max_ts - ts) / 1e9 if max_ts > ts else 0.0
             type_str = alloc_types.get(atype, "?")
             bit32 = "yes" if is32 else " no"
@@ -1113,29 +1127,8 @@ def main():
                 tid_stats[k.value] = (v.alloc_count, v.alloc_bytes)
 
             # --- Process/Thread Tree ---
-            # Deferred correlation: match create_requests with thread_started
-            # events using absolute timestamp proximity.  This handles
-            # out-of-order perf buffer delivery across CPUs.
-            unmatched = [t for t in thread_timeline if t not in thread_parent]
-            remaining_reqs = list(create_requests)
-            for tid in unmatched:
-                info = thread_timeline[tid]
-                pid = info.get("pid", 0)
-                create_ns = info.get("create_ns", 0)
-                if not pid or not create_ns:
-                    continue
-                best_idx = None
-                best_delta = float('inf')
-                for i, (ts, cr_tid, req_pid, req_fnc) in enumerate(remaining_reqs):
-                    if req_pid != pid:
-                        continue
-                    delta = abs(create_ns - ts)
-                    if delta < best_delta:
-                        best_delta = delta
-                        best_idx = i
-                if best_idx is not None and best_delta < 5_000_000_000:
-                    _, creator_tid, _, _ = remaining_reqs.pop(best_idx)
-                    thread_parent[tid] = creator_tid
+            correlate_thread_parents(thread_timeline, create_requests,
+                                     thread_parent)
 
             all_tids = set(thread_timeline.keys()) | set(tid_stats.keys())
 
@@ -1238,8 +1231,9 @@ def main():
                 for sample in cow_info["child_samples"]:
                     cs = sample["smaps"]
                     elapsed = sample["time"] - cow_info["snapshot_time"]
-                    delta_dirty = cs.get("Private_Dirty", 0) - ps.get("Private_Dirty", 0)
-                    delta_minflt = sample["minflt"] - cow_info["parent_minflt"]
+                    delta_dirty, delta_minflt = compute_cow_deltas(
+                        ps, cow_info["parent_minflt"],
+                        cs, sample["minflt"])
                     print(f"    Child PID {sample['pid']} (after {elapsed:.1f}s):")
                     print(f"      Private_Dirty: {fmt_size(cs.get('Private_Dirty', 0)):>10}"
                           f"  (+{fmt_size(delta_dirty)} CoW)")
