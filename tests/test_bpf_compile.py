@@ -80,9 +80,9 @@ def compile_in_subprocess(bpf_src, cflags):
     output = result.stdout.strip()
     error_lines = [ln for ln in output.splitlines() if ": error:" in ln]
 
-    if result.returncode == 0 or (not error_lines and result.returncode == 1):
-        # returncode 1 with no ": error:" lines means warnings-only —
-        # old BCC raises an exception even on warnings. Treat as success.
+    if result.returncode == 0 or not error_lines:
+        # No ': error:' lines means the C compilation succeeded (possibly
+        # with warnings). Old BCC may raise exceptions on warnings-only.
         return True, None
 
     if error_lines:
