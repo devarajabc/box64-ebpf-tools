@@ -1,23 +1,16 @@
-"""Test _rewrite_atomic_increment string replacement."""
+"""Test _rewrite_atomic_increment against real BPF_PROGRAM source."""
 import re
 
-
-def _rewrite_atomic_increment(bpf_text):
-    def _replace(m):
-        table = m.group(1)
-        key = m.group(2)
-        return (
-            f'{{ u64 _ai_zero = 0, *_ai_val = '
-            f'{table}.lookup_or_init(&({key}), &_ai_zero); '
-            f'if (_ai_val) __sync_fetch_and_add(_ai_val, 1); }}'
-        )
-    return re.sub(r'(\w+)\.atomic_increment\((\w+)\)', _replace, bpf_text)
+import box64_dynarec
+import box64_steam
 
 
-class TestRewriteAtomicIncrement:
+class TestRewriteFunction:
+    """Test the rewrite regex on synthetic inputs."""
+
     def test_single_replacement(self):
         src = "    alloc_sizes.atomic_increment(bucket);\n"
-        out = _rewrite_atomic_increment(src)
+        out = box64_dynarec._rewrite_atomic_increment(src)
         assert "atomic_increment" not in out
         assert "alloc_sizes.lookup_or_init" in out
         assert "__sync_fetch_and_add" in out
@@ -28,13 +21,13 @@ class TestRewriteAtomicIncrement:
             "alloc_sizes.atomic_increment(bucket);\n"
             "block_lifetimes.atomic_increment(lt_bucket);\n"
         )
-        out = _rewrite_atomic_increment(src)
+        out = box64_dynarec._rewrite_atomic_increment(src)
         assert out.count("lookup_or_init") == 2
         assert out.count("__sync_fetch_and_add") == 2
 
     def test_no_match_untouched(self):
         src = "int x = 42;\n"
-        assert _rewrite_atomic_increment(src) == src
+        assert box64_dynarec._rewrite_atomic_increment(src) == src
 
     def test_preserves_surrounding_code(self):
         src = (
@@ -42,18 +35,94 @@ class TestRewriteAtomicIncrement:
             "    alloc_sizes.atomic_increment(bucket);\n"
             "#ifdef TRACK_THREADS\n"
         )
-        out = _rewrite_atomic_increment(src)
+        out = box64_dynarec._rewrite_atomic_increment(src)
         assert "log2_u64" in out
         assert "TRACK_THREADS" in out
 
-    def test_all_six_call_sites(self):
-        """Verify regex matches the exact patterns used in the tools."""
-        patterns = [
-            "alloc_sizes.atomic_increment(bucket)",
-            "block_lifetimes.atomic_increment(lt_bucket)",
-            "death_isizes.atomic_increment(is_bucket)",
-            "death_native_sizes.atomic_increment(ns_bucket)",
-        ]
-        for p in patterns:
-            out = _rewrite_atomic_increment(p)
-            assert "atomic_increment" not in out, f"Failed to rewrite: {p}"
+
+class TestRewriteDynarecBPF:
+    """Test rewrite against real box64_dynarec.py BPF_PROGRAM."""
+
+    def test_rewrites_exactly_2_calls(self):
+        original = box64_dynarec.BPF_PROGRAM
+        count = len(re.findall(r'\w+\.atomic_increment\(\w+\)', original))
+        assert count == 2, f"Expected 2 atomic_increment calls, found {count}"
+
+    def test_no_atomic_increment_after_rewrite(self):
+        rewritten = box64_dynarec._rewrite_atomic_increment(
+            box64_dynarec.BPF_PROGRAM
+        )
+        remaining = re.findall(r'\w+\.atomic_increment\(\w+\)', rewritten)
+        assert remaining == [], f"Unrewritten calls: {remaining}"
+
+    def test_rewrite_inserts_lookup_or_init(self):
+        rewritten = box64_dynarec._rewrite_atomic_increment(
+            box64_dynarec.BPF_PROGRAM
+        )
+        assert rewritten.count("lookup_or_init") == 2
+
+    def test_rewrite_inserts_sync_fetch_and_add(self):
+        rewritten = box64_dynarec._rewrite_atomic_increment(
+            box64_dynarec.BPF_PROGRAM
+        )
+        orig_count = box64_dynarec.BPF_PROGRAM.count("__sync_fetch_and_add")
+        new_count = rewritten.count("__sync_fetch_and_add")
+        assert new_count == orig_count + 2
+
+    def test_non_atomic_increment_lines_unchanged(self):
+        original = box64_dynarec.BPF_PROGRAM
+        rewritten = box64_dynarec._rewrite_atomic_increment(original)
+        orig_lines = original.splitlines()
+        new_lines = rewritten.splitlines()
+        for orig, new in zip(orig_lines, new_lines):
+            if "atomic_increment" not in orig:
+                assert orig == new
+
+
+class TestRewriteSteamBPF:
+    """Test rewrite against real box64_steam.py BPF_PROGRAM."""
+
+    def test_rewrites_exactly_4_calls(self):
+        original = box64_steam.BPF_PROGRAM
+        count = len(re.findall(r'\w+\.atomic_increment\(\w+\)', original))
+        assert count == 4, f"Expected 4 atomic_increment calls, found {count}"
+
+    def test_no_atomic_increment_after_rewrite(self):
+        rewritten = box64_steam._rewrite_atomic_increment(
+            box64_steam.BPF_PROGRAM
+        )
+        remaining = re.findall(r'\w+\.atomic_increment\(\w+\)', rewritten)
+        assert remaining == [], f"Unrewritten calls: {remaining}"
+
+    def test_rewrite_inserts_lookup_or_init(self):
+        rewritten = box64_steam._rewrite_atomic_increment(
+            box64_steam.BPF_PROGRAM
+        )
+        assert rewritten.count("lookup_or_init") == 4
+
+    def test_rewrite_inserts_sync_fetch_and_add(self):
+        rewritten = box64_steam._rewrite_atomic_increment(
+            box64_steam.BPF_PROGRAM
+        )
+        orig_count = box64_steam.BPF_PROGRAM.count("__sync_fetch_and_add")
+        new_count = rewritten.count("__sync_fetch_and_add")
+        assert new_count == orig_count + 4
+
+    def test_non_atomic_increment_lines_unchanged(self):
+        original = box64_steam.BPF_PROGRAM
+        rewritten = box64_steam._rewrite_atomic_increment(original)
+        orig_lines = original.splitlines()
+        new_lines = rewritten.splitlines()
+        for orig, new in zip(orig_lines, new_lines):
+            if "atomic_increment" not in orig:
+                assert orig == new
+
+
+class TestBothToolsConsistent:
+    """Verify both tools have identical rewrite logic."""
+
+    def test_same_rewrite_on_shared_input(self):
+        src = "hist.atomic_increment(k);"
+        d = box64_dynarec._rewrite_atomic_increment(src)
+        s = box64_steam._rewrite_atomic_increment(src)
+        assert d == s
