@@ -35,50 +35,61 @@ def discover_test_binaries(test_dir):
 
 
 def run_tool_test(tool_script, tool_args, box64_bin, test_bins,
-                  attach_wait=3, grace_period=2, timeout=90):
+                  ready_timeout=30, grace_period=2, timeout=90):
     """Run an eBPF tool against Box64 processes and return its stdout.
 
-    1. Start the tool in background
-    2. Wait for probe attachment
+    1. Start the tool, redirect output to temp files
+    2. Poll stdout for "probes attached" (BPF compilation can be slow)
     3. Run Box64 with each test binary in sequence
     4. Wait for completion + grace period
     5. SIGINT the tool to trigger final report
     6. Return (stdout, stderr, returncode)
     """
+    import tempfile
+
     tool_path = os.path.join(REPO_ROOT, tool_script)
-    cmd = [sys.executable, tool_path, "-b", box64_bin] + tool_args
+    cmd = [sys.executable, "-u", tool_path, "-b", box64_bin] + tool_args
+
+    # Use temp files so we can poll stdout for readiness
+    stdout_fd, stdout_path = tempfile.mkstemp(prefix="ebpf_stdout_")
+    stderr_fd, stderr_path = tempfile.mkstemp(prefix="ebpf_stderr_")
+    stdout_file = os.fdopen(stdout_fd, "w")
+    stderr_file = os.fdopen(stderr_fd, "w")
 
     print(f"  Starting: {' '.join(cmd)}")
-    tool_proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    tool_proc = subprocess.Popen(cmd, stdout=stdout_file, stderr=stderr_file)
 
-    # Wait for probes to attach
-    print(f"  Waiting {attach_wait}s for probe attachment...")
-    time.sleep(attach_wait)
-
-    # Check tool didn't crash during startup
-    if tool_proc.poll() is not None:
-        stdout, stderr = tool_proc.communicate()
-        return stdout, stderr, tool_proc.returncode
-
-    # Dump registered uprobes for debugging
-    for dbg_path in ["/sys/kernel/debug/tracing/uprobe_events",
-                     "/sys/kernel/debug/tracing/uprobe_profile"]:
+    # Poll stdout for "probes attached" — this confirms BPF compiled and
+    # all uprobes are registered. Much more reliable than a fixed sleep.
+    ready = False
+    for i in range(ready_timeout):
+        if tool_proc.poll() is not None:
+            # Tool exited before becoming ready
+            break
         try:
-            with open(dbg_path) as f:
-                content = f.read().strip()
-            if content:
-                print(f"  DEBUG {os.path.basename(dbg_path)}:")
-                for line in content.splitlines()[:20]:
-                    print(f"         {line}")
-            else:
-                print(f"  DEBUG {os.path.basename(dbg_path)}: (empty)")
+            with open(stdout_path) as f:
+                content = f.read()
+            if "probes attached" in content:
+                ready = True
+                print(f"  Tool ready after {i + 1}s")
+                break
         except OSError:
-            print(f"  DEBUG {os.path.basename(dbg_path)}: (not accessible)")
+            pass
+        time.sleep(1)
+
+    if not ready:
+        if tool_proc.poll() is not None:
+            stdout_file.close()
+            stderr_file.close()
+            with open(stdout_path) as f:
+                stdout = f.read()
+            with open(stderr_path) as f:
+                stderr = f.read()
+            os.unlink(stdout_path)
+            os.unlink(stderr_path)
+            print(f"  Tool exited early (code {tool_proc.returncode})")
+            return stdout, stderr, tool_proc.returncode
+        print(f"  WARNING: Tool not ready after {ready_timeout}s, proceeding anyway")
 
     # Run Box64 with each test binary
     ran = 0
@@ -102,17 +113,6 @@ def run_tool_test(tool_script, tool_args, box64_bin, test_bins,
 
     print(f"  Ran {ran} test binaries")
 
-    # Dump uprobe hit counts after running tests
-    try:
-        with open("/sys/kernel/debug/tracing/uprobe_profile") as f:
-            content = f.read().strip()
-        if content:
-            print(f"  DEBUG uprobe_profile (after tests):")
-            for line in content.splitlines()[:20]:
-                print(f"         {line}")
-    except OSError:
-        pass
-
     # Grace period for final eBPF poll cycle
     print(f"  Waiting {grace_period}s for final poll cycle...")
     time.sleep(grace_period)
@@ -122,10 +122,20 @@ def run_tool_test(tool_script, tool_args, box64_bin, test_bins,
     tool_proc.send_signal(signal.SIGINT)
 
     try:
-        stdout, stderr = tool_proc.communicate(timeout=timeout)
+        tool_proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         tool_proc.kill()
-        stdout, stderr = tool_proc.communicate()
+        tool_proc.wait()
+
+    stdout_file.close()
+    stderr_file.close()
+
+    with open(stdout_path) as f:
+        stdout = f.read()
+    with open(stderr_path) as f:
+        stderr = f.read()
+    os.unlink(stdout_path)
+    os.unlink(stderr_path)
 
     return stdout, stderr, tool_proc.returncode
 
