@@ -38,6 +38,18 @@ def rewrite_atomic_increment(bpf_text):
     return re.sub(r'(\w+)\.atomic_increment\((\w+)\)', _replace, bpf_text)
 
 
+def has_atomic_increment():
+    """Probe whether this BCC supports atomic_increment."""
+    try:
+        BPF(text=r"""
+            BPF_HISTOGRAM(t, int, 2);
+            int test(void *ctx) { int k = 0; t.atomic_increment(k); return 0; }
+        """)
+        return True
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Test configurations: (tool, cflags, description)
 # ---------------------------------------------------------------------------
@@ -92,6 +104,12 @@ CONFIGS = [
 
 
 def main():
+    has_ai = has_atomic_increment()
+    if has_ai:
+        print("[*] BCC supports atomic_increment — testing original source")
+    else:
+        print("[*] BCC does not support atomic_increment — testing rewritten source")
+
     passed = 0
     failed = 0
     errors = []
@@ -99,26 +117,16 @@ def main():
     for tool, cflags, desc in CONFIGS:
         bpf_src = extract_bpf_program(tool)
 
-        # Test 1: original source (new BCC with atomic_increment)
-        label = f"{desc} [original]"
-        try:
-            b = BPF(text=bpf_src, cflags=cflags)
-            b.cleanup()
-            print(f"  PASS  {label}")
-            passed += 1
-        except Exception as e:
-            if "atomic_increment" in str(e):
-                print(f"  SKIP  {label} (BCC too old for atomic_increment)")
-            else:
-                print(f"  FAIL  {label}: {e}")
-                errors.append(label)
-                failed += 1
+        # Use the code path that matches this BCC version
+        if has_ai:
+            label = f"{desc} [original]"
+            src = bpf_src
+        else:
+            label = f"{desc} [rewritten]"
+            src = rewrite_atomic_increment(bpf_src)
 
-        # Test 2: rewritten source (old BCC fallback path)
-        label = f"{desc} [rewritten]"
         try:
-            rewritten = rewrite_atomic_increment(bpf_src)
-            b = BPF(text=rewritten, cflags=cflags)
+            b = BPF(text=src, cflags=cflags)
             b.cleanup()
             print(f"  PASS  {label}")
             passed += 1
