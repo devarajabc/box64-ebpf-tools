@@ -522,20 +522,40 @@ def check_steam_sampling(box64_bin, test_bins):
     return ok, errors
 
 
-def ref_path_for(test_bin):
-    """Derive refNN.txt path from testNN binary path."""
-    base = os.path.basename(test_bin)
-    m = re.match(r'test(\d+.*)', base)
-    if not m:
-        return None
-    ref = os.path.join(os.path.dirname(test_bin), f"ref{m.group(1)}.txt")
-    return ref if os.path.isfile(ref) else None
+def run_baseline(box64_bin, test_bins):
+    """Run Box64 with each test binary (no eBPF) and return per-binary output."""
+    baseline = {}
+    for test_bin in test_bins:
+        name = os.path.basename(test_bin)
+        try:
+            result = subprocess.run(
+                [box64_bin, test_bin],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=BOX64_PER_BINARY_TIMEOUT,
+            )
+            baseline[name] = (result.stdout, result.returncode)
+        except (subprocess.TimeoutExpired, OSError):
+            baseline[name] = ("", -1)
+    return baseline
 
 
 def check_output_correctness(box64_bin, test_bins):
-    """Verify Box64 output matches ref files while eBPF uprobes are attached."""
+    """Verify Box64 output is unchanged while eBPF uprobes are attached.
+
+    Compares a baseline run (no probes) against a probed run to detect
+    instrumentation-induced perturbations.  Does NOT compare against upstream
+    refNN.txt files, because Box64 on ARM64 has known FP-precision divergences.
+    """
     print("\n--- Output correctness (uprobes attached) ---")
 
+    # 1. Baseline: run without any eBPF tool
+    print("  Running baseline (no probes)...")
+    baseline = run_baseline(box64_bin, test_bins)
+    print(f"  Baseline: {len(baseline)} binaries")
+
+    # 2. Probed: run with lightest tool
     stdout, stderr, rc, bin_results = run_tool_test(
         "box64_dynarec.py", ["-i", "1"],
         box64_bin, test_bins,
@@ -546,41 +566,37 @@ def check_output_correctness(box64_bin, test_bins):
     matched = 0
 
     for name, bin_stdout, bin_rc in bin_results:
-        ref = ref_path_for(
-            next(tb for tb in test_bins if os.path.basename(tb) == name)
-        )
-        if ref is None:
-            continue
-        if bin_rc != 0:
-            print(f"    {name}: skipped (exit {bin_rc})")
+        base_stdout, base_rc = baseline.get(name, ("", -1))
+
+        # Skip if either run failed
+        if base_rc != 0 or bin_rc != 0:
+            print(f"    {name}: skipped (baseline exit {base_rc},"
+                  f" probed exit {bin_rc})")
             continue
 
         checked += 1
-        with open(ref) as f:
-            expected = f.read()
-
         actual_lines = bin_stdout.rstrip().splitlines()
-        expected_lines = expected.rstrip().splitlines()
+        expected_lines = base_stdout.rstrip().splitlines()
 
         if actual_lines == expected_lines:
             matched += 1
         else:
-            errors.append(f"{name}: output differs from {os.path.basename(ref)}")
-            print(f"  FAIL  {name}: output differs")
+            errors.append(f"{name}: output differs with probes attached")
+            print(f"  FAIL  {name}: output differs (baseline vs probed)")
             # Show first diff
             for i, (a, e) in enumerate(zip(actual_lines, expected_lines)):
                 if a != e:
-                    print(f"         line {i+1} expected: {e[:80]}")
-                    print(f"         line {i+1} actual:   {a[:80]}")
+                    print(f"         line {i+1} baseline: {e[:80]}")
+                    print(f"         line {i+1} probed:   {a[:80]}")
                     break
 
-    print(f"  INFO  {matched}/{checked} binaries matched ref output")
+    print(f"  INFO  {matched}/{checked} binaries matched baseline output")
 
     ok = len(errors) == 0
     if ok and checked > 0:
         print(f"  PASS  Output correctness ({matched}/{checked} matched)")
     elif checked == 0:
-        print(f"  SKIP  No testNN binaries with ref files found")
+        print(f"  SKIP  No binaries produced output in both runs")
     return ok, errors
 
 
@@ -656,7 +672,7 @@ def main():
         failed += 1
         errors.extend(errs)
 
-    # Output correctness: only testNN binaries (from --test-dir) have ref files
+    # Output correctness: only testNN binaries have deterministic output
     testdir_bins = [tb for tb in test_bins
                     if re.match(r'test\d+', os.path.basename(tb))]
     if testdir_bins:

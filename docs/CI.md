@@ -152,10 +152,10 @@ Assertions for `box64_steam.py` (PC sampling — `--sample-freq 4999`):
 - `PC Sampling Profile` section present
 - No Python tracebacks
 
-Assertions for output correctness (runs `box64_dynarec.py` with uprobes attached):
-- For each testNN binary that exits 0 with a matching refNN.txt:
-  Box64's stdout must match the reference output exactly
-- Verifies eBPF instrumentation does not perturb Box64's emulation behavior
+Assertions for output correctness (baseline vs probed comparison):
+- Runs each testNN binary twice: once without probes (baseline), once with `box64_dynarec.py` uprobes attached
+- For each binary that exits 0 in both runs: stdout must match exactly
+- Detects instrumentation-induced perturbations without relying on upstream refNN.txt files (which may diverge on ARM64 due to known FP-precision differences)
 
 All tools run with **default settings** (all features enabled). The tools auto-disable features if optional symbols are missing in the Box64 build.
 
