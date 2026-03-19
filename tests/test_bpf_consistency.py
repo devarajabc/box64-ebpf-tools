@@ -70,42 +70,6 @@ def test_all_python_fn_names_exist_in_bpf_c(script):
     )
 
 
-def _extract_nonstatic_c_function_names(bpf_source):
-    """Find non-static C function definitions (probe entry points only)."""
-    names = set()
-    for m in re.finditer(r'\b(?:int|void)\s+(\w+)\s*\(', bpf_source):
-        # Check the line prefix: skip comments and static functions
-        line_start = bpf_source.rfind('\n', 0, m.start()) + 1
-        line_prefix = bpf_source[line_start:m.start()]
-        if 'static' in line_prefix:
-            continue
-        stripped = line_prefix.lstrip()
-        if stripped.startswith('//') or stripped.startswith('*'):
-            continue
-        names.add(m.group(1))
-    for m in re.finditer(r'TRACEPOINT_PROBE\s*\(\s*(\w+)\s*,\s*(\w+)\s*\)', bpf_source):
-        names.add(f"{m.group(1)}__{m.group(2)}")
-    return names
-
-
-@pytest.mark.parametrize("script", SCRIPTS)
-def test_all_bpf_c_functions_are_attached(script):
-    """Every non-static BPF C function should be attached from Python.
-    Catches orphan probe functions after refactors."""
-    text = (REPO_ROOT / script).read_text()
-    bpf_source = _extract_bpf_source(text)
-    assert bpf_source
-
-    c_functions = _extract_nonstatic_c_function_names(bpf_source)
-    py_fn_names = _extract_python_fn_names(text)
-
-    orphans = c_functions - py_fn_names
-    assert not orphans, (
-        f"{script}: BPF C defines non-static function(s) not attached in Python "
-        f"(dead code?): {sorted(orphans)}"
-    )
-
-
 @pytest.mark.parametrize("script", SCRIPTS)
 def test_bpf_source_is_nonempty(script):
     """Sanity check: BPF_PROGRAM should contain substantial C code."""

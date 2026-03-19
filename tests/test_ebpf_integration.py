@@ -291,6 +291,233 @@ def check_memleak(box64_bin, test_bins):
     return ok, errors
 
 
+def check_steam(box64_bin, test_bins):
+    """Test box64_steam.py against live Box64 processes with multi-process workload."""
+    print("\n--- box64_steam.py ---")
+
+    stdout, stderr, rc = run_tool_test(
+        "box64_steam.py",
+        ["-i", "2"],
+        box64_bin, test_bins,
+        ready_timeout=40,
+    )
+
+    combined = stdout + "\n" + stderr
+    errors = []
+
+    if not check_no_tracebacks(combined, "steam"):
+        errors.append("Python traceback detected")
+
+    # Print tool startup info for debugging
+    for line in stdout.splitlines():
+        if line.startswith("[*]") or line.startswith("WARNING"):
+            print(f"  TOOL  {line}")
+
+    if "FINAL REPORT" not in stdout:
+        errors.append("FINAL REPORT not found in output")
+        print(f"  FAIL  steam: FINAL REPORT not found")
+        print(f"  stdout ({len(stdout)} chars): {stdout[:500]}")
+        print(f"  stderr ({len(stderr)} chars): {stderr[:500]}")
+        return False, errors
+
+    # fork count >= 1
+    m = re.search(r"fork:\s+(\d+)", stdout)
+    if m:
+        count = int(m.group(1))
+        if count >= 1:
+            print(f"  PASS  fork: {count}")
+        else:
+            errors.append("fork count is 0")
+            print(f"  FAIL  fork count is 0")
+    else:
+        errors.append("fork line not found")
+        print(f"  FAIL  fork line not found")
+
+    # vfork count >= 1
+    m = re.search(r"vfork:\s+(\d+)", stdout)
+    if m:
+        count = int(m.group(1))
+        if count >= 1:
+            print(f"  PASS  vfork: {count}")
+        else:
+            errors.append("vfork count is 0")
+            print(f"  FAIL  vfork count is 0")
+    else:
+        errors.append("vfork line not found")
+        print(f"  FAIL  vfork line not found")
+
+    # exec (all) count >= 2
+    m = re.search(r"exec \(all\):\s+(\d+)", stdout)
+    if m:
+        count = int(m.group(1))
+        if count >= 2:
+            print(f"  PASS  exec (all): {count}")
+        else:
+            errors.append(f"exec (all) count is {count}, expected >= 2")
+            print(f"  FAIL  exec (all) count is {count}, expected >= 2")
+    else:
+        errors.append("exec (all) line not found")
+        print(f"  FAIL  exec (all) line not found")
+
+    # NewBox64Context count >= 3
+    m = re.search(r"NewBox64Context:\s+(\d+)", stdout)
+    if m:
+        count = int(m.group(1))
+        if count >= 3:
+            print(f"  PASS  NewBox64Context: {count}")
+        else:
+            errors.append(f"NewBox64Context count is {count}, expected >= 3")
+            print(f"  FAIL  NewBox64Context count is {count}, expected >= 3")
+    else:
+        errors.append("NewBox64Context line not found")
+        print(f"  FAIL  NewBox64Context line not found")
+
+    # AllocDynarecMap count > 0
+    m = re.search(r"AllocDynarecMap:\s+(\d+)", stdout)
+    if m:
+        count = int(m.group(1))
+        if count > 0:
+            print(f"  PASS  AllocDynarecMap: {count}")
+        else:
+            errors.append("AllocDynarecMap count is 0")
+            print(f"  FAIL  AllocDynarecMap count is 0")
+    else:
+        errors.append("AllocDynarecMap line not found")
+        print(f"  FAIL  AllocDynarecMap line not found")
+
+    # malloc count > 0 (from Custom Allocator Totals section)
+    m = re.search(r"malloc:\s+(\d+)", stdout)
+    if m:
+        count = int(m.group(1))
+        if count > 0:
+            print(f"  PASS  malloc: {count}")
+        else:
+            errors.append("malloc count is 0")
+            print(f"  FAIL  malloc count is 0")
+    else:
+        errors.append("malloc line not found")
+        print(f"  FAIL  malloc line not found")
+
+    # Box64 Process Tree with >= 2 distinct PIDs
+    if "Box64 Process Tree:" in stdout:
+        # Extract PIDs from tree lines (format: "  PID NNNNN ...")
+        tree_pids = set(re.findall(r"PID\s+(\d+)", stdout))
+        if len(tree_pids) >= 2:
+            print(f"  PASS  Box64 Process Tree: {len(tree_pids)} PIDs")
+        else:
+            errors.append(f"Process tree has {len(tree_pids)} PIDs, expected >= 2")
+            print(f"  FAIL  Process tree has {len(tree_pids)} PIDs, expected >= 2")
+    else:
+        errors.append("Box64 Process Tree section not found")
+        print(f"  FAIL  Box64 Process Tree section not found")
+
+    # Per-PID Memory Breakdown with >= 2 PID sections
+    if "Per-PID Memory Breakdown:" in stdout:
+        pid_sections = re.findall(r"PID\s+\d+", stdout)
+        if len(pid_sections) >= 2:
+            print(f"  PASS  Per-PID Memory Breakdown: {len(pid_sections)} PID sections")
+        else:
+            errors.append(f"Per-PID Breakdown has {len(pid_sections)} sections, expected >= 2")
+            print(f"  FAIL  Per-PID Breakdown has {len(pid_sections)} sections, expected >= 2")
+    else:
+        errors.append("Per-PID Memory Breakdown section not found")
+        print(f"  FAIL  Per-PID Memory Breakdown section not found")
+
+    # Informational checks (no fail)
+    if "Memory Growth Timeline" in stdout:
+        print(f"  INFO  Memory Growth Timeline present")
+    else:
+        print(f"  INFO  Memory Growth Timeline not present")
+
+    m = re.search(r"protectDB:\s+(\d+)\s+calls", stdout)
+    if m:
+        print(f"  INFO  protectDB: {m.group(1)} calls")
+    else:
+        print(f"  INFO  protectDB not found (symbols may be absent)")
+
+    ok = len(errors) == 0
+    if ok:
+        print(f"  PASS  box64_steam.py (all assertions passed)")
+    else:
+        if stderr.strip():
+            print(f"  DEBUG stderr ({len(stderr)} chars):")
+            for line in stderr.strip().splitlines()[:30]:
+                print(f"         {line}")
+    return ok, errors
+
+
+def check_steam_sampling(box64_bin, test_bins):
+    """Test box64_steam.py with PC sampling (--sample-freq) enabled."""
+    print("\n--- box64_steam.py (PC sampling) ---")
+
+    stdout, stderr, rc = run_tool_test(
+        "box64_steam.py",
+        ["-i", "2", "--sample-freq", "4999"],
+        box64_bin, test_bins,
+        ready_timeout=40,
+        grace_period=4,
+    )
+
+    combined = stdout + "\n" + stderr
+    errors = []
+
+    if not check_no_tracebacks(combined, "steam-sampling"):
+        errors.append("Python traceback detected")
+
+    # Print tool startup info for debugging
+    for line in stdout.splitlines():
+        if line.startswith("[*]") or line.startswith("WARNING"):
+            print(f"  TOOL  {line}")
+
+    if "FINAL REPORT" not in stdout:
+        errors.append("FINAL REPORT not found in output")
+        print(f"  FAIL  steam-sampling: FINAL REPORT not found")
+        print(f"  stdout ({len(stdout)} chars): {stdout[:500]}")
+        print(f"  stderr ({len(stderr)} chars): {stderr[:500]}")
+        return False, errors
+
+    # NewBox64Context count >= 1
+    m = re.search(r"NewBox64Context:\s+(\d+)", stdout)
+    if m:
+        count = int(m.group(1))
+        if count >= 1:
+            print(f"  PASS  NewBox64Context: {count}")
+        else:
+            errors.append("NewBox64Context count is 0")
+            print(f"  FAIL  NewBox64Context count is 0")
+    else:
+        errors.append("NewBox64Context line not found")
+        print(f"  FAIL  NewBox64Context line not found")
+
+    # PC Sampling Profile section present
+    if "PC Sampling Profile" in stdout:
+        print(f"  PASS  PC Sampling Profile section present")
+    else:
+        errors.append("PC Sampling Profile section not found")
+        print(f"  FAIL  PC Sampling Profile section not found")
+
+    # Informational checks (no fail)
+    if "Block Age Distribution:" in stdout:
+        print(f"  INFO  Block Age Distribution present")
+    else:
+        print(f"  INFO  Block Age Distribution not present")
+
+    if "Eviction Threshold Analysis:" in stdout:
+        print(f"  INFO  Eviction Threshold Analysis present")
+    else:
+        print(f"  INFO  Eviction Threshold Analysis not present")
+
+    ok = len(errors) == 0
+    if ok:
+        print(f"  PASS  box64_steam.py PC sampling (all assertions passed)")
+    else:
+        if stderr.strip():
+            print(f"  DEBUG stderr ({len(stderr)} chars):")
+            for line in stderr.strip().splitlines()[:30]:
+                print(f"         {line}")
+    return ok, errors
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="eBPF integration tests against live Box64")
@@ -362,6 +589,38 @@ def main():
     else:
         failed += 1
         errors.extend(errs)
+
+    # Steam tests use specific binaries
+    steam_bin = next(
+        (tb for tb in test_bins if 'steam_lifecycle' in os.path.basename(tb)),
+        None,
+    )
+    stress_bin = next(
+        (tb for tb in test_bins if 'dynarec_stress' in os.path.basename(tb)),
+        None,
+    )
+
+    if steam_bin:
+        steam_bins = [steam_bin]
+        if stress_bin:
+            steam_bins.append(stress_bin)
+
+        ok, errs = check_steam(args.box64, steam_bins)
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+            errors.extend(errs)
+
+        ok, errs = check_steam_sampling(args.box64, [steam_bin])
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+            errors.extend(errs)
+    else:
+        print("\n  SKIP  box64_steam.py: steam_lifecycle binary not found")
+        print("  SKIP  box64_steam.py (PC sampling): steam_lifecycle binary not found")
 
     # Summary
     print(f"\n{'=' * 60}")

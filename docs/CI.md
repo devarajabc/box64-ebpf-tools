@@ -92,15 +92,23 @@ Runs on `ubuntu-24.04-arm` (ARM64, kernel 6.8+, full eBPF/uprobe support).
 | Cache Box64 build | Caches `/tmp/box64-build`, keyed on workflow file hash |
 | Clone Box64 source | Shallow clone of upstream Box64 |
 | Build Box64 | `cmake` with `-DARM_DYNAREC=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo` (skipped on cache hit) |
-| Cross-compile stress test | `x86_64-linux-gnu-gcc` compiles `tests/dynarec_stress.c` to x86_64 ELF |
+| Cross-compile test binaries | `x86_64-linux-gnu-gcc` compiles `tests/dynarec_stress.c` and `tests/steam_lifecycle.c` to x86_64 ELF |
 | Run integration tests | `sudo python3 tests/test_ebpf_integration.py` |
 
 ### Test binaries
 
-Two sources of x86_64 test binaries are used:
+Three sources of x86_64 test binaries are used:
 
 1. **Custom stress test** (`tests/dynarec_stress.c`) — cross-compiled to x86_64 on the ARM64 runner. Contains hot loops and multiple functions specifically designed to force DynaRec JIT block allocation.
-2. **Box64's own test suite** (`test01`–`test33`) — pre-compiled x86_64 ELF binaries from the upstream Box64 repo, auto-discovered via `--test-dir`.
+2. **Steam lifecycle test** (`tests/steam_lifecycle.c`) — cross-compiled to x86_64. A multi-process binary that calls `fork()`, `vfork()`, and `execve()` to create a process tree, exercising Box64's wrapped libc (`my_fork`, `my_vfork`, `my_execve`). Creates this tree:
+   ```
+   box64 steam_lifecycle          (parent: fork + vfork + hot loops)
+   +-- box64 steam_lifecycle --child   (fork child: hot loops + exec)
+   |   +-- box64 steam_lifecycle --worker 1   (exec'd worker)
+   +-- box64 steam_lifecycle --vchild  (vfork child: immediate exec)
+       +-- box64 steam_lifecycle --worker 1   (exec'd worker)
+   ```
+3. **Box64's own test suite** (`test01`–`test33`) — pre-compiled x86_64 ELF binaries from the upstream Box64 repo, auto-discovered via `--test-dir`.
 
 All binaries are run in sequence during each tool test. Individual binary failures or timeouts (10s per binary) are tolerated — our eBPF tools still collect probe data from whatever activity occurred.
 
@@ -108,7 +116,7 @@ All binaries are run in sequence during each tool test. Individual binary failur
 
 The integration test harness (`tests/test_ebpf_integration.py`) orchestrates:
 
-1. Starts an eBPF tool (`box64_dynarec.py` or `box64_memleak.py`) in the background
+1. Starts an eBPF tool (`box64_dynarec.py`, `box64_memleak.py`, or `box64_steam.py`) in the background
 2. Polls tool stdout for "probes attached" (BPF compilation takes 4–6s on ARM64)
 3. Runs Box64 with each test binary in sequence — exercising DynaRec JIT, `customMalloc`, protection calls, etc.
 4. Waits 2s grace period for the final eBPF poll cycle
@@ -126,9 +134,27 @@ Assertions for `box64_memleak.py`:
 - `Total mallocs` count > 0 (Box64 uses `customMalloc` internally)
 - No Python tracebacks
 
-Both tools run with **default settings** (all features enabled). The tools auto-disable features if optional symbols are missing in the Box64 build.
+Assertions for `box64_steam.py` (default flags — all features enabled):
+- Output contains `FINAL REPORT`
+- `fork` count >= 1
+- `vfork` count >= 1
+- `exec (all)` count >= 2
+- `NewBox64Context` count >= 3
+- `AllocDynarecMap` count > 0
+- `malloc` count > 0
+- `Box64 Process Tree` present with >= 2 distinct PIDs
+- `Per-PID Memory Breakdown` present with >= 2 PID sections
+- No Python tracebacks
 
-Estimated runtime: ~15–20 minutes (Box64 build: 5–8 min on first run, cached thereafter; tests: 5–8 min with all binaries).
+Assertions for `box64_steam.py` (PC sampling — `--sample-freq 4999`):
+- Output contains `FINAL REPORT`
+- `NewBox64Context` count >= 1
+- `PC Sampling Profile` section present
+- No Python tracebacks
+
+All tools run with **default settings** (all features enabled). The tools auto-disable features if optional symbols are missing in the Box64 build.
+
+Estimated runtime: ~20–25 minutes (Box64 build: 5–8 min on first run, cached thereafter; tests: 8–12 min with all binaries and steam tests).
 
 ## Running Tests Locally
 
@@ -144,10 +170,11 @@ sudo python3 tests/test_bpf_compile.py
 BOX64_SRC_DIR=/path/to/box64 pytest tests/test_upstream_compat.py -v
 
 # E2E integration (root + BCC + ARM64 Linux + Box64 binary)
-# Cross-compile the stress test first:
+# Cross-compile test binaries first:
 #   x86_64-linux-gnu-gcc -O1 -o /tmp/dynarec_stress tests/dynarec_stress.c
+#   x86_64-linux-gnu-gcc -O1 -o /tmp/steam_lifecycle tests/steam_lifecycle.c
 sudo python3 tests/test_ebpf_integration.py \
     --box64 /path/to/box64 \
-    --test-bin /tmp/dynarec_stress \
+    --test-bin /tmp/dynarec_stress /tmp/steam_lifecycle \
     --test-dir /path/to/box64-src/tests
 ```
