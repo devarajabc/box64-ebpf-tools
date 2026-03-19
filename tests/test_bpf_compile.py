@@ -68,7 +68,8 @@ def compile_in_subprocess(bpf_src, cflags):
         result = subprocess.run(
             [sys.executable, path, json.dumps(cflags)],
             input=bpf_src,
-            capture_output=True, text=True, timeout=60,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=60,
         )
     finally:
         os.unlink(path)
@@ -77,14 +78,17 @@ def compile_in_subprocess(bpf_src, cflags):
         return True, None
     if result.returncode == 2:
         return None, "BCC not installed"
-    # Combine stdout + stderr; extract the most useful line
-    output = (result.stdout + "\n" + result.stderr).strip()
+    output = result.stdout.strip()
     # Find actual C compilation errors
     error_lines = [l for l in output.splitlines() if ": error:" in l]
     if error_lines:
-        msg = error_lines[0]
+        msg = "; ".join(error_lines[:3])
+    elif output:
+        # Show last 3 non-empty lines (most likely the real error)
+        lines = [l for l in output.splitlines() if l.strip()]
+        msg = "; ".join(lines[-3:])
     else:
-        msg = output.splitlines()[0] if output else f"exit code {result.returncode}"
+        msg = f"exit code {result.returncode}"
     return False, msg
 
 
