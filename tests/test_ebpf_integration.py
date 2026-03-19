@@ -65,6 +65,21 @@ def run_tool_test(tool_script, tool_args, box64_bin, test_bins,
         stdout, stderr = tool_proc.communicate()
         return stdout, stderr, tool_proc.returncode
 
+    # Dump registered uprobes for debugging
+    for dbg_path in ["/sys/kernel/debug/tracing/uprobe_events",
+                     "/sys/kernel/debug/tracing/uprobe_profile"]:
+        try:
+            with open(dbg_path) as f:
+                content = f.read().strip()
+            if content:
+                print(f"  DEBUG {os.path.basename(dbg_path)}:")
+                for line in content.splitlines()[:20]:
+                    print(f"         {line}")
+            else:
+                print(f"  DEBUG {os.path.basename(dbg_path)}: (empty)")
+        except OSError:
+            print(f"  DEBUG {os.path.basename(dbg_path)}: (not accessible)")
+
     # Run Box64 with each test binary
     ran = 0
     for test_bin in test_bins:
@@ -86,6 +101,17 @@ def run_tool_test(tool_script, tool_args, box64_bin, test_bins,
         ran += 1
 
     print(f"  Ran {ran} test binaries")
+
+    # Dump uprobe hit counts after running tests
+    try:
+        with open("/sys/kernel/debug/tracing/uprobe_profile") as f:
+            content = f.read().strip()
+        if content:
+            print(f"  DEBUG uprobe_profile (after tests):")
+            for line in content.splitlines()[:20]:
+                print(f"         {line}")
+    except OSError:
+        pass
 
     # Grace period for final eBPF poll cycle
     print(f"  Waiting {grace_period}s for final poll cycle...")
