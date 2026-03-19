@@ -1,0 +1,41 @@
+name: E2E eBPF Integration (ARM64)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  e2e-box64:
+    name: eBPF tools against live Box64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-bpfcc cmake gcc g++ git
+
+      - name: Cache Box64 build
+        id: cache-box64
+        uses: actions/cache@v4
+        with:
+          path: /tmp/box64-build
+          key: box64-arm64-${{ hashFiles('.github/workflows/e2e-arm64.yml') }}
+
+      - name: Clone Box64 source
+        run: git clone --depth=1 https://github.com/ptitSeb/box64.git /tmp/box64-src
+
+      - name: Build Box64
+        if: steps.cache-box64.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /tmp/box64-build && cd /tmp/box64-build
+          cmake /tmp/box64-src -DARM_DYNAREC=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          make -j$(nproc)
+
+      - name: Run eBPF integration tests
+        run: |
+          sudo python3 tests/test_ebpf_integration.py \
+            --box64 /tmp/box64-build/box64 \
+            --test-bin /tmp/box64-src/tests/test01
+        timeout-minutes: 5

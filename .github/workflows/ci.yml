@@ -20,7 +20,7 @@ jobs:
       - name: Lint
         run: ruff check box64_dynarec.py box64_memleak.py box64_steam.py box64_common.py tests/
       - name: Unit tests
-        run: pytest tests/ -v --tb=short --ignore=tests/test_upstream_compat.py
+        run: pytest tests/ -v --tb=short --ignore=tests/test_upstream_compat.py --ignore=tests/test_ebpf_integration.py
 
   bpf-compile:
     name: BPF C compilation test
