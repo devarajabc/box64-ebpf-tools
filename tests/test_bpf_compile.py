@@ -4,15 +4,14 @@
 Requires: root, python3-bcc (or python3-bpfcc).
 Run directly (not through pytest, which mocks BCC):
     sudo python3 tests/test_bpf_compile.py
+
+Each compilation runs in a subprocess to isolate BCC/LLVM segfaults
+that occur on old BCC versions after failed compilations.
 """
 import re
+import subprocess
 import sys
-
-try:
-    from bcc import BPF
-except ImportError:
-    print("SKIP: BCC not installed")
-    sys.exit(0)
+import textwrap
 
 
 def extract_bpf_program(path):
@@ -38,16 +37,37 @@ def rewrite_atomic_increment(bpf_text):
     return re.sub(r'(\w+)\.atomic_increment\((\w+)\)', _replace, bpf_text)
 
 
-def has_atomic_increment():
-    """Probe whether this BCC supports atomic_increment."""
-    try:
-        BPF(text=r"""
-            BPF_HISTOGRAM(t, int, 2);
-            int test(void *ctx) { int k = 0; t.atomic_increment(k); return 0; }
-        """)
-        return True
-    except Exception:
-        return False
+def compile_in_subprocess(bpf_src, cflags):
+    """Compile BPF C in a child process. Returns (ok, error_msg)."""
+    # Escape for safe embedding in Python string
+    escaped_src = bpf_src.replace('\\', '\\\\').replace("'", "\\'")
+    cflags_repr = repr(cflags)
+
+    code = textwrap.dedent(f"""\
+        import sys
+        try:
+            from bcc import BPF
+        except ImportError:
+            print("BCC not installed")
+            sys.exit(2)
+        try:
+            b = BPF(text='''{escaped_src}''', cflags={cflags_repr})
+            b.cleanup()
+        except Exception as e:
+            print(str(e))
+            sys.exit(1)
+    """)
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode == 0:
+        return True, None
+    if result.returncode == 2:
+        return None, "BCC not installed"
+    msg = result.stdout.strip() or result.stderr.strip() or f"exit code {result.returncode}"
+    return False, msg
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +75,6 @@ def has_atomic_increment():
 # ---------------------------------------------------------------------------
 
 CONFIGS = [
-    # --- box64_dynarec.py ---
     ("box64_dynarec.py", [
         "-DCHURN_THRESHOLD_NS=1000000000ULL",
         "-DHASH_CAPACITY=524288",
@@ -69,7 +88,6 @@ CONFIGS = [
         "-DHASH_CAPACITY=524288",
     ], "dynarec minimal"),
 
-    # --- box64_memleak.py ---
     ("box64_memleak.py", [
         "-DHASH_CAPACITY=524288",
         "-DCAPTURE_STACKS",
@@ -83,7 +101,6 @@ CONFIGS = [
         "-DHASH_CAPACITY=524288",
     ], "memleak minimal"),
 
-    # --- box64_steam.py ---
     ("box64_steam.py", [
         "-DCHURN_THRESHOLD_NS=1000000000ULL",
         "-DHASH_CAPACITY=524288",
@@ -104,7 +121,17 @@ CONFIGS = [
 
 
 def main():
-    has_ai = has_atomic_increment()
+    # Detect atomic_increment support in a subprocess (safe from segfaults)
+    ok, _ = compile_in_subprocess(
+        r"""
+        BPF_HISTOGRAM(t, int, 2);
+        int test(void *ctx) { int k = 0; t.atomic_increment(k); return 0; }
+        """, [])
+    if ok is None:
+        print("SKIP: BCC not installed")
+        return 0
+
+    has_ai = bool(ok)
     if has_ai:
         print("[*] BCC supports atomic_increment — testing original source")
     else:
@@ -117,7 +144,6 @@ def main():
     for tool, cflags, desc in CONFIGS:
         bpf_src = extract_bpf_program(tool)
 
-        # Use the code path that matches this BCC version
         if has_ai:
             label = f"{desc} [original]"
             src = bpf_src
@@ -125,13 +151,12 @@ def main():
             label = f"{desc} [rewritten]"
             src = rewrite_atomic_increment(bpf_src)
 
-        try:
-            b = BPF(text=src, cflags=cflags)
-            b.cleanup()
+        ok, err = compile_in_subprocess(src, cflags)
+        if ok:
             print(f"  PASS  {label}")
             passed += 1
-        except Exception as e:
-            print(f"  FAIL  {label}: {e}")
+        else:
+            print(f"  FAIL  {label}: {err}")
             errors.append(label)
             failed += 1
 
