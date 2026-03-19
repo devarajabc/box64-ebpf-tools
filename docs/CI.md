@@ -109,7 +109,7 @@ All binaries are run in sequence during each tool test. Individual binary failur
 The integration test harness (`tests/test_ebpf_integration.py`) orchestrates:
 
 1. Starts an eBPF tool (`box64_dynarec.py` or `box64_memleak.py`) in the background
-2. Waits 3s for probe attachment
+2. Polls tool stdout for "probes attached" (BPF compilation takes 4–6s on ARM64)
 3. Runs Box64 with each test binary in sequence — exercising DynaRec JIT, `customMalloc`, protection calls, etc.
 4. Waits 2s grace period for the final eBPF poll cycle
 5. Sends `SIGINT` to the tool, triggering `print_final_report()`

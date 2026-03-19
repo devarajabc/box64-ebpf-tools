@@ -37,24 +37,8 @@ jobs:
         if: steps.cache-box64.outputs.cache-hit != 'true'
         run: |
           mkdir -p /tmp/box64-build && cd /tmp/box64-build
-          # -fno-inline-small-functions: prevent GCC from inlining small static
-          # functions like AllocDynarecMap. Without this, the compiler inlines them
-          # at -O2, leaving the out-of-line symbol as dead code that uprobes
-          # attach to but never fires.
-          cmake /tmp/box64-src -DARM_DYNAREC=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_C_FLAGS="-fno-inline-small-functions"
+          cmake /tmp/box64-src -DARM_DYNAREC=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
           make -j$(nproc)
-
-      - name: Verify Box64 build and symbols
-        run: |
-          echo "--- Binary info ---"
-          file /tmp/box64-build/box64
-          echo "--- DynaRec symbols ---"
-          nm /tmp/box64-build/box64 | grep -i 'AllocDynarecMap\|FreeDynarecMap\|protectDB\|customMalloc' || echo "No matching symbols found"
-          echo "--- DynaRec symbol count ---"
-          nm /tmp/box64-build/box64 | grep -ci dynarec || echo "0 dynarec symbols"
-          echo "--- Quick Box64 run with logging ---"
-          BOX64_LOG=1 /tmp/box64-build/box64 /tmp/dynarec_stress 2>&1 | head -40 || true
 
       - name: Run eBPF integration tests
         run: |
