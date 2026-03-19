@@ -37,7 +37,12 @@ jobs:
         if: steps.cache-box64.outputs.cache-hit != 'true'
         run: |
           mkdir -p /tmp/box64-build && cd /tmp/box64-build
-          cmake /tmp/box64-src -DARM_DYNAREC=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          # -fno-inline-small-functions: prevent GCC from inlining small static
+          # functions like AllocDynarecMap. Without this, the compiler inlines them
+          # at -O2, leaving the out-of-line symbol as dead code that uprobes
+          # attach to but never fires.
+          cmake /tmp/box64-src -DARM_DYNAREC=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_FLAGS="-fno-inline-small-functions"
           make -j$(nproc)
 
       - name: Verify Box64 build and symbols

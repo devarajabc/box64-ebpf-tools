@@ -136,6 +136,11 @@ def check_dynarec(box64_bin, test_bins):
     if not check_no_tracebacks(combined, "dynarec"):
         errors.append("Python traceback detected")
 
+    # Print tool startup info for debugging
+    for line in stdout.splitlines():
+        if line.startswith("[*]") or line.startswith("WARNING"):
+            print(f"  TOOL  {line}")
+
     if "FINAL REPORT" not in stdout:
         errors.append("FINAL REPORT not found in output")
         print(f"  FAIL  dynarec: FINAL REPORT not found")
@@ -208,6 +213,11 @@ def check_memleak(box64_bin, test_bins):
 
     if not check_no_tracebacks(combined, "memleak"):
         errors.append("Python traceback detected")
+
+    # Print tool startup info for debugging
+    for line in stdout.splitlines():
+        if line.startswith("[*]") or line.startswith("WARNING"):
+            print(f"  TOOL  {line}")
 
     if "FINAL REPORT" not in stdout:
         errors.append("FINAL REPORT not found in output")
