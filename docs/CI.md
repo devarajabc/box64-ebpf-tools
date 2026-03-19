@@ -92,13 +92,25 @@ Runs on `ubuntu-24.04-arm` (ARM64, kernel 6.8+, full eBPF/uprobe support).
 | Cache Box64 build | Caches `/tmp/box64-build`, keyed on workflow file hash |
 | Clone Box64 source | Shallow clone of upstream Box64 |
 | Build Box64 | `cmake` with `-DARM_DYNAREC=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo` (skipped on cache hit) |
+| Cross-compile stress test | `x86_64-linux-gnu-gcc` compiles `tests/dynarec_stress.c` to x86_64 ELF |
 | Run integration tests | `sudo python3 tests/test_ebpf_integration.py` |
+
+### Test binaries
+
+Two sources of x86_64 test binaries are used:
+
+1. **Custom stress test** (`tests/dynarec_stress.c`) — cross-compiled to x86_64 on the ARM64 runner. Contains hot loops and multiple functions specifically designed to force DynaRec JIT block allocation.
+2. **Box64's own test suite** (`test01`–`test33`) — pre-compiled x86_64 ELF binaries from the upstream Box64 repo, auto-discovered via `--test-dir`.
+
+All binaries are run in sequence during each tool test. Individual binary failures or timeouts (10s per binary) are tolerated — our eBPF tools still collect probe data from whatever activity occurred.
+
+### Test harness
 
 The integration test harness (`tests/test_ebpf_integration.py`) orchestrates:
 
 1. Starts an eBPF tool (`box64_dynarec.py` or `box64_memleak.py`) in the background
 2. Waits 3s for probe attachment
-3. Runs `box64 test01` — Box64 emulates a pre-compiled x86_64 test binary, exercising DynaRec JIT, `customMalloc`, protection calls, etc.
+3. Runs Box64 with each test binary in sequence — exercising DynaRec JIT, `customMalloc`, protection calls, etc.
 4. Waits 2s grace period for the final eBPF poll cycle
 5. Sends `SIGINT` to the tool, triggering `print_final_report()`
 6. Parses stdout and asserts correctness
@@ -116,7 +128,7 @@ Assertions for `box64_memleak.py`:
 
 Both tools run with **default settings** (all features enabled). The tools auto-disable features if optional symbols are missing in the Box64 build.
 
-Estimated runtime: ~10–15 minutes (Box64 build: 5–8 min on first run, cached thereafter; tests: 2–3 min).
+Estimated runtime: ~15–20 minutes (Box64 build: 5–8 min on first run, cached thereafter; tests: 5–8 min with all binaries).
 
 ## Running Tests Locally
 
@@ -132,7 +144,10 @@ sudo python3 tests/test_bpf_compile.py
 BOX64_SRC_DIR=/path/to/box64 pytest tests/test_upstream_compat.py -v
 
 # E2E integration (root + BCC + ARM64 Linux + Box64 binary)
+# Cross-compile the stress test first:
+#   x86_64-linux-gnu-gcc -O1 -o /tmp/dynarec_stress tests/dynarec_stress.c
 sudo python3 tests/test_ebpf_integration.py \
     --box64 /path/to/box64 \
-    --test-bin /path/to/box64-src/tests/test01
+    --test-bin /tmp/dynarec_stress \
+    --test-dir /path/to/box64-src/tests
 ```

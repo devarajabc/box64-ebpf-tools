@@ -9,12 +9,19 @@ jobs:
   e2e-box64:
     name: eBPF tools against live Box64
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y python3-bpfcc cmake gcc g++ git
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-bpfcc cmake gcc g++ git gcc-x86-64-linux-gnu
+
+      - name: Cross-compile custom stress test (x86_64)
+        run: |
+          x86_64-linux-gnu-gcc -O1 -o /tmp/dynarec_stress tests/dynarec_stress.c
+          file /tmp/dynarec_stress
 
       - name: Cache Box64 build
         id: cache-box64
@@ -37,5 +44,6 @@ jobs:
         run: |
           sudo python3 tests/test_ebpf_integration.py \
             --box64 /tmp/box64-build/box64 \
-            --test-bin /tmp/box64-src/tests/test01
-        timeout-minutes: 5
+            --test-bin /tmp/dynarec_stress \
+            --test-dir /tmp/box64-src/tests
+        timeout-minutes: 10

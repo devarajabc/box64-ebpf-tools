@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """End-to-end eBPF integration tests: run our tools against a live Box64 process.
 
-Requires: root, python3-bcc, a Box64 binary (with debug symbols), and a Box64
-test binary (e.g. tests/test01 from the Box64 repo).
+Requires: root, python3-bcc, a Box64 binary (with debug symbols), and one or
+more x86_64 test binaries for Box64 to emulate.
 
 Run directly (not through pytest):
     sudo python3 tests/test_ebpf_integration.py \
         --box64 /tmp/box64-build/box64 \
-        --test-bin /tmp/box64-src/tests/test01
+        --test-bin /tmp/dynarec_stress \
+        --test-dir /tmp/box64-src/tests
 """
 import argparse
+import glob
 import os
 import re
 import signal
@@ -20,14 +22,25 @@ import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Per-binary timeout — some Box64 tests may hang on missing libs
+BOX64_PER_BINARY_TIMEOUT = 10
 
-def run_tool_test(tool_script, tool_args, box64_bin, test_bin,
-                  attach_wait=3, grace_period=2, timeout=60):
-    """Run an eBPF tool against a Box64 process and return its stdout.
+
+def discover_test_binaries(test_dir):
+    """Find pre-compiled Box64 test binaries (test01..test33) in a directory."""
+    pattern = os.path.join(test_dir, "test[0-9][0-9]")
+    bins = sorted(glob.glob(pattern))
+    # Filter to actual files (not directories or symlinks to directories)
+    return [b for b in bins if os.path.isfile(b)]
+
+
+def run_tool_test(tool_script, tool_args, box64_bin, test_bins,
+                  attach_wait=3, grace_period=2, timeout=90):
+    """Run an eBPF tool against Box64 processes and return its stdout.
 
     1. Start the tool in background
     2. Wait for probe attachment
-    3. Run Box64 with the test binary
+    3. Run Box64 with each test binary in sequence
     4. Wait for completion + grace period
     5. SIGINT the tool to trigger final report
     6. Return (stdout, stderr, returncode)
@@ -52,20 +65,27 @@ def run_tool_test(tool_script, tool_args, box64_bin, test_bin,
         stdout, stderr = tool_proc.communicate()
         return stdout, stderr, tool_proc.returncode
 
-    # Run Box64 with the test binary
-    box64_cmd = [box64_bin, test_bin]
-    print(f"  Running: {' '.join(box64_cmd)}")
-    try:
-        box64_result = subprocess.run(
-            box64_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=30,
-        )
-        print(f"  Box64 exited with code {box64_result.returncode}")
-    except subprocess.TimeoutExpired:
-        print("  WARNING: Box64 timed out after 30s")
+    # Run Box64 with each test binary
+    ran = 0
+    for test_bin in test_bins:
+        name = os.path.basename(test_bin)
+        try:
+            result = subprocess.run(
+                [box64_bin, test_bin],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=BOX64_PER_BINARY_TIMEOUT,
+            )
+            status = f"exit {result.returncode}"
+        except subprocess.TimeoutExpired:
+            status = "TIMEOUT"
+        except OSError as e:
+            status = f"ERROR: {e}"
+        print(f"    {name}: {status}")
+        ran += 1
+
+    print(f"  Ran {ran} test binaries")
 
     # Grace period for final eBPF poll cycle
     print(f"  Waiting {grace_period}s for final poll cycle...")
@@ -88,7 +108,6 @@ def check_no_tracebacks(output, label):
     """Check for Python tracebacks in output."""
     if "Traceback (most recent call last)" in output:
         print(f"  FAIL  {label}: Python traceback in output")
-        # Print the traceback for debugging
         for line in output.splitlines():
             if "Traceback" in line or "Error" in line or "  File " in line:
                 print(f"         {line}")
@@ -96,24 +115,27 @@ def check_no_tracebacks(output, label):
     return True
 
 
-def check_dynarec(box64_bin, test_bin):
-    """Test box64_dynarec.py against a live Box64 process."""
+def is_zero_size(s):
+    """Check if a fmt_size() output string represents zero bytes."""
+    return bool(re.match(r'^0(\.0+)?\s*B?$', s.strip()))
+
+
+def check_dynarec(box64_bin, test_bins):
+    """Test box64_dynarec.py against live Box64 processes."""
     print("\n--- box64_dynarec.py ---")
 
     stdout, stderr, rc = run_tool_test(
         "box64_dynarec.py",
         ["-i", "1"],
-        box64_bin, test_bin,
+        box64_bin, test_bins,
     )
 
     combined = stdout + "\n" + stderr
     errors = []
 
-    # Check for tracebacks
     if not check_no_tracebacks(combined, "dynarec"):
         errors.append("Python traceback detected")
 
-    # Check for FINAL REPORT
     if "FINAL REPORT" not in stdout:
         errors.append("FINAL REPORT not found in output")
         print(f"  FAIL  dynarec: FINAL REPORT not found")
@@ -121,41 +143,43 @@ def check_dynarec(box64_bin, test_bin):
         print(f"  stderr ({len(stderr)} chars): {stderr[:500]}")
         return False, errors
 
-    # Check AllocDynarecMap count > 0
+    # AllocDynarecMap count > 0
     m = re.search(r"AllocDynarecMap:\s+(\d+)", stdout)
     if m:
-        alloc_count = int(m.group(1))
-        if alloc_count > 0:
-            print(f"  PASS  AllocDynarecMap: {alloc_count}")
+        count = int(m.group(1))
+        if count > 0:
+            print(f"  PASS  AllocDynarecMap: {count}")
         else:
             errors.append("AllocDynarecMap count is 0")
             print(f"  FAIL  AllocDynarecMap count is 0")
     else:
         errors.append("AllocDynarecMap line not found")
-        print(f"  FAIL  AllocDynarecMap line not found in output")
+        print(f"  FAIL  AllocDynarecMap line not found")
 
-    # Check Bytes allocated > 0
-    m = re.search(r"Bytes allocated:\s+(\S+)", stdout)
+    # Bytes allocated > 0
+    m = re.search(r"Bytes allocated:\s+(.+)", stdout)
     if m:
-        bytes_str = m.group(1)
-        # fmt_size returns "0 B" for zero, otherwise something like "1.2 MB"
-        if bytes_str == "0" or bytes_str == "0 B":
+        val = m.group(1).strip()
+        if is_zero_size(val):
             errors.append("Bytes allocated is 0")
             print(f"  FAIL  Bytes allocated is 0")
         else:
-            print(f"  PASS  Bytes allocated: {bytes_str}")
+            print(f"  PASS  Bytes allocated: {val}")
     else:
         errors.append("Bytes allocated line not found")
-        print(f"  FAIL  Bytes allocated line not found in output")
+        print(f"  FAIL  Bytes allocated line not found")
 
-    # Check protection tracking (default-on feature)
+    # FreeDynarecMap count (informational)
+    m = re.search(r"FreeDynarecMap:\s+(\d+)", stdout)
+    if m:
+        print(f"  INFO  FreeDynarecMap: {m.group(1)}")
+
+    # Protection tracking (default-on)
     m = re.search(r"protectDB:\s+(\d+)\s+calls", stdout)
     if m:
-        prot_count = int(m.group(1))
-        print(f"  PASS  protectDB: {prot_count} calls")
+        print(f"  INFO  protectDB: {m.group(1)} calls")
     else:
-        # Protection section may be absent if symbols were auto-disabled
-        print(f"  INFO  protectDB line not found (symbols may be absent)")
+        print(f"  INFO  protectDB not found (symbols may be absent)")
 
     ok = len(errors) == 0
     if ok:
@@ -163,24 +187,22 @@ def check_dynarec(box64_bin, test_bin):
     return ok, errors
 
 
-def check_memleak(box64_bin, test_bin):
-    """Test box64_memleak.py against a live Box64 process."""
+def check_memleak(box64_bin, test_bins):
+    """Test box64_memleak.py against live Box64 processes."""
     print("\n--- box64_memleak.py ---")
 
     stdout, stderr, rc = run_tool_test(
         "box64_memleak.py",
         ["-i", "1"],
-        box64_bin, test_bin,
+        box64_bin, test_bins,
     )
 
     combined = stdout + "\n" + stderr
     errors = []
 
-    # Check for tracebacks
     if not check_no_tracebacks(combined, "memleak"):
         errors.append("Python traceback detected")
 
-    # Check for FINAL REPORT
     if "FINAL REPORT" not in stdout:
         errors.append("FINAL REPORT not found in output")
         print(f"  FAIL  memleak: FINAL REPORT not found")
@@ -188,18 +210,28 @@ def check_memleak(box64_bin, test_bin):
         print(f"  stderr ({len(stderr)} chars): {stderr[:500]}")
         return False, errors
 
-    # Check Total mallocs > 0
+    # Total mallocs > 0
     m = re.search(r"Total mallocs:\s+(\d+)", stdout)
     if m:
-        malloc_count = int(m.group(1))
-        if malloc_count > 0:
-            print(f"  PASS  Total mallocs: {malloc_count}")
+        count = int(m.group(1))
+        if count > 0:
+            print(f"  PASS  Total mallocs: {count}")
         else:
             errors.append("Total mallocs count is 0")
             print(f"  FAIL  Total mallocs count is 0")
     else:
         errors.append("Total mallocs line not found")
-        print(f"  FAIL  Total mallocs line not found in output")
+        print(f"  FAIL  Total mallocs line not found")
+
+    # Total frees (informational)
+    m = re.search(r"Total frees:\s+(\d+)", stdout)
+    if m:
+        print(f"  INFO  Total frees: {m.group(1)}")
+
+    # Bytes allocated (informational)
+    m = re.search(r"Bytes allocated:\s*(.+)", stdout)
+    if m:
+        print(f"  INFO  Bytes allocated: {m.group(1).strip()}")
 
     ok = len(errors) == 0
     if ok:
@@ -212,20 +244,37 @@ def main():
         description="eBPF integration tests against live Box64")
     parser.add_argument("--box64", required=True,
                         help="Path to Box64 binary (with debug symbols)")
-    parser.add_argument("--test-bin", required=True,
-                        help="Path to a Box64 test binary (e.g. test01)")
+    parser.add_argument("--test-bin", nargs="+", default=[],
+                        help="Explicit path(s) to x86_64 test binaries")
+    parser.add_argument("--test-dir",
+                        help="Directory to discover Box64 test binaries "
+                             "(test01..test33)")
     args = parser.parse_args()
 
-    # Validate paths
+    # Validate Box64 binary
     if not os.path.isfile(args.box64):
         print(f"ERROR: Box64 binary not found: {args.box64}")
         return 1
     if not os.access(args.box64, os.X_OK):
         print(f"ERROR: Box64 binary not executable: {args.box64}")
         return 1
-    if not os.path.isfile(args.test_bin):
-        print(f"ERROR: Test binary not found: {args.test_bin}")
+
+    # Collect test binaries from both sources
+    test_bins = list(args.test_bin)
+    if args.test_dir:
+        discovered = discover_test_binaries(args.test_dir)
+        print(f"Discovered {len(discovered)} test binaries in {args.test_dir}")
+        test_bins.extend(discovered)
+
+    if not test_bins:
+        print("ERROR: No test binaries specified (use --test-bin and/or --test-dir)")
         return 1
+
+    # Validate explicit test binaries exist
+    for tb in args.test_bin:
+        if not os.path.isfile(tb):
+            print(f"ERROR: Test binary not found: {tb}")
+            return 1
 
     # Check we're root (needed for eBPF)
     if os.geteuid() != 0:
@@ -239,23 +288,23 @@ def main():
         print("SKIP: python3-bcc not installed")
         return 0
 
-    print(f"Box64 binary: {args.box64}")
-    print(f"Test binary:  {args.test_bin}")
+    print(f"Box64 binary:  {args.box64}")
+    print(f"Test binaries: {len(test_bins)} total")
+    for tb in test_bins:
+        print(f"  {tb}")
 
     passed = 0
     failed = 0
     errors = []
 
-    # Test dynarec tool
-    ok, errs = check_dynarec(args.box64, args.test_bin)
+    ok, errs = check_dynarec(args.box64, test_bins)
     if ok:
         passed += 1
     else:
         failed += 1
         errors.extend(errs)
 
-    # Test memleak tool
-    ok, errs = check_memleak(args.box64, args.test_bin)
+    ok, errs = check_memleak(args.box64, test_bins)
     if ok:
         passed += 1
     else:
