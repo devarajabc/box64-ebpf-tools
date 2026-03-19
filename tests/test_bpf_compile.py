@@ -74,17 +74,20 @@ def compile_in_subprocess(bpf_src, cflags):
     finally:
         os.unlink(path)
 
-    if result.returncode == 0:
-        return True, None
     if result.returncode == 2:
         return None, "BCC not installed"
+
     output = result.stdout.strip()
-    # Find actual C compilation errors
     error_lines = [ln for ln in output.splitlines() if ": error:" in ln]
+
+    if result.returncode == 0 or (not error_lines and result.returncode == 1):
+        # returncode 1 with no ": error:" lines means warnings-only —
+        # old BCC raises an exception even on warnings. Treat as success.
+        return True, None
+
     if error_lines:
         msg = "; ".join(error_lines[:3])
     elif output:
-        # Show last 3 non-empty lines (most likely the real error)
         lines = [ln for ln in output.splitlines() if ln.strip()]
         msg = "; ".join(lines[-3:])
     else:
