@@ -108,14 +108,31 @@ REQUIRED_CONFIGS = [
         "-DHASH_CAPACITY=524288",
     ], "dynarec core"),
 
+    ("box64_dynarec.py", [
+        "-DCHURN_THRESHOLD_NS=1000000000ULL",
+        "-DHASH_CAPACITY=524288",
+        "-DFILTER_PID=1234",
+    ], "dynarec with pid filter"),
+
     ("box64_memleak.py", [
         "-DHASH_CAPACITY=524288",
     ], "memleak core"),
+
+    ("box64_memleak.py", [
+        "-DHASH_CAPACITY=524288",
+        "-DFILTER_PID=1234",
+    ], "memleak with pid filter"),
 
     ("box64_steam.py", [
         "-DCHURN_THRESHOLD_NS=1000000000ULL",
         "-DHASH_CAPACITY=524288",
     ], "steam core"),
+
+    ("box64_steam.py", [
+        "-DCHURN_THRESHOLD_NS=1000000000ULL",
+        "-DHASH_CAPACITY=524288",
+        "-DFILTER_PID=1234",
+    ], "steam with pid filter"),
 ]
 
 # Optional configs — compile errors are reported but don't fail CI.
@@ -150,6 +167,20 @@ OPTIONAL_CONFIGS = [
         "-DTRACK_THREADS",
         "-DTRACK_COW",
     ], "steam all features"),
+
+    ("box64_steam.py", [
+        "-DCHURN_THRESHOLD_NS=1000000000ULL",
+        "-DHASH_CAPACITY=524288",
+        "-DTRACK_MEM",
+        "-DTRACK_DYNAREC",
+        "-DTRACK_PROT",
+        "-DTRACK_BLOCK_DETAIL",
+        "-DTRACK_MMAP",
+        "-DTRACK_THREADS",
+        "-DTRACK_COW",
+        "-DTRACK_PROFILE",
+        "-DPROFILE_CAPACITY=524288",
+    ], "steam all features + profile"),
 ]
 
 
