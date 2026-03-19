@@ -22,53 +22,15 @@ jobs:
       - name: Unit tests
         run: pytest tests/ -v --tb=short --ignore=tests/test_upstream_compat.py
 
-  bcc-compat:
-    name: BCC atomic_increment fallback test
+  bpf-compile:
+    name: BPF C compilation test
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: Install BCC
         run: sudo apt-get update && sudo apt-get install -y python3-bpfcc
-      - name: Test rewritten BPF C compiles
-        run: |
-          sudo python3 -c "
-          import re
-
-          def _rewrite_atomic_increment(bpf_text):
-              def _replace(m):
-                  table, key = m.group(1), m.group(2)
-                  return (
-                      f'{{ u64 _ai_zero = 0, *_ai_val = '
-                      f'{table}.lookup_or_init(&({key}), &_ai_zero); '
-                      f'if (_ai_val) __sync_fetch_and_add(_ai_val, 1); }}')
-              return re.sub(r'(\w+)\.atomic_increment\((\w+)\)', _replace, bpf_text)
-
-          from bcc import BPF
-          src = r'''
-              BPF_HISTOGRAM(test_hist, int, 64);
-              int test(void *ctx) {
-                  int bucket = 3;
-                  test_hist.atomic_increment(bucket);
-                  return 0;
-              }
-          '''
-          rewritten = _rewrite_atomic_increment(src)
-          BPF(text=rewritten)
-          print('PASS: rewritten BPF C compiles on this BCC')
-          "
-      - name: Test BCC detection probe
-        run: |
-          sudo python3 -c "
-          from bcc import BPF
-          try:
-              BPF(text=r'''
-                  BPF_HISTOGRAM(t, int, 2);
-                  int test(void *ctx) { int k=0; t.atomic_increment(k); return 0; }
-              ''')
-              print('PASS: this BCC supports atomic_increment')
-          except:
-              print('INFO: this BCC does not support atomic_increment (fallback will be used)')
-          "
+      - name: Compile all BPF programs
+        run: sudo python3 tests/test_bpf_compile.py
 
   upstream-compat:
     runs-on: ubuntu-latest
