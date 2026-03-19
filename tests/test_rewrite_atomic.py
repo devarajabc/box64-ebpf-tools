@@ -1,5 +1,9 @@
-"""Test _rewrite_atomic_increment against real BPF_PROGRAM source."""
+"""Test _rewrite_atomic_increment and _bcc_has_atomic_increment against
+real BPF_PROGRAM source."""
 import re
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 import box64_dynarec
 import box64_steam
@@ -126,3 +130,41 @@ class TestBothToolsConsistent:
         d = box64_dynarec._rewrite_atomic_increment(src)
         s = box64_steam._rewrite_atomic_increment(src)
         assert d == s
+
+
+# ---------------------------------------------------------------------------
+# _bcc_has_atomic_increment detection
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("module", [box64_dynarec, box64_steam],
+                         ids=["dynarec", "steam"])
+class TestBccHasAtomicIncrement:
+    def test_returns_true_when_bpf_succeeds(self, module, monkeypatch):
+        """If BPF() compiles without error, detection returns True."""
+        mock_bpf = MagicMock()
+        monkeypatch.setattr(module, "BPF", mock_bpf)
+        assert module._bcc_has_atomic_increment() is True
+
+    def test_returns_false_when_bpf_raises(self, module, monkeypatch):
+        """If BPF() raises (old BCC), detection returns False."""
+        mock_bpf = MagicMock(side_effect=Exception("no member named 'atomic_increment'"))
+        monkeypatch.setattr(module, "BPF", mock_bpf)
+        assert module._bcc_has_atomic_increment() is False
+
+    def test_returns_false_on_any_exception(self, module, monkeypatch):
+        """Any exception type should be caught, not just specific ones."""
+        mock_bpf = MagicMock(side_effect=RuntimeError("unexpected"))
+        monkeypatch.setattr(module, "BPF", mock_bpf)
+        assert module._bcc_has_atomic_increment() is False
+
+
+def test_memleak_has_no_detection():
+    """box64_memleak has no atomic_increment usage, so no detection."""
+    import box64_memleak
+    assert not hasattr(box64_memleak, "_bcc_has_atomic_increment")
+
+
+def test_memleak_has_no_rewrite():
+    """box64_memleak has no atomic_increment usage, so no rewrite."""
+    import box64_memleak
+    assert not hasattr(box64_memleak, "_rewrite_atomic_increment")
