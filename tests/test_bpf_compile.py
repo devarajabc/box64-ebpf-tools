@@ -39,29 +39,40 @@ def rewrite_atomic_increment(bpf_text):
 
 def compile_in_subprocess(bpf_src, cflags):
     """Compile BPF C in a child process. Returns (ok, error_msg)."""
-    # Escape for safe embedding in Python string
-    escaped_src = bpf_src.replace('\\', '\\\\').replace("'", "\\'")
-    cflags_repr = repr(cflags)
+    import json
+    import os
+    import tempfile
 
-    code = textwrap.dedent(f"""\
-        import sys
+    # Write a temp script that reads BPF source from stdin
+    script = textwrap.dedent("""\
+        import json, sys
         try:
             from bcc import BPF
         except ImportError:
             print("BCC not installed")
             sys.exit(2)
         try:
-            b = BPF(text='''{escaped_src}''', cflags={cflags_repr})
+            bpf_src = sys.stdin.read()
+            cflags = json.loads(sys.argv[1])
+            b = BPF(text=bpf_src, cflags=cflags)
             b.cleanup()
         except Exception as e:
             print(str(e))
             sys.exit(1)
     """)
 
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True, text=True, timeout=60,
-    )
+    fd, path = tempfile.mkstemp(suffix=".py")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(script)
+        result = subprocess.run(
+            [sys.executable, path, json.dumps(cflags)],
+            input=bpf_src,
+            capture_output=True, text=True, timeout=60,
+        )
+    finally:
+        os.unlink(path)
+
     if result.returncode == 0:
         return True, None
     if result.returncode == 2:
