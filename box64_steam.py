@@ -1608,6 +1608,14 @@ int trace_cow_fault(struct pt_regs *ctx) {
 // =========================================================================
 #ifdef TRACK_PROFILE
 
+// BCC helpers.h only forward-declares bpf_perf_event_data; provide the
+// definition so we can access ctx->regs on all architectures.
+struct bpf_perf_event_data {
+    bpf_user_pt_regs_t regs;
+    __u64 sample_period;
+    __u64 addr;
+};
+
 struct pc_key_t {
     u32 pid;
     u32 bucket;    // ip >> 8 (256-byte granularity)
