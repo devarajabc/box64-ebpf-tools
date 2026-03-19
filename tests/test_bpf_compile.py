@@ -80,81 +80,61 @@ def compile_in_subprocess(bpf_src, cflags):
     output = result.stdout.strip()
     error_lines = [ln for ln in output.splitlines() if ": error:" in ln]
 
-    if result.returncode == 0 or not error_lines:
-        # No ': error:' lines means the C compilation succeeded (possibly
-        # with warnings). Old BCC may raise exceptions on warnings-only.
+    if result.returncode == 0:
         return True, None
 
-    if error_lines:
-        msg = "; ".join(error_lines[:3])
-    elif output:
-        lines = [ln for ln in output.splitlines() if ln.strip()]
-        msg = "; ".join(lines[-3:])
-    else:
-        msg = f"exit code {result.returncode}"
-    return False, msg
+    # Non-zero exit. Check if it's just BCC warnings (old BCC raises
+    # exceptions on warnings-only, but the C compilation itself succeeded).
+    # Heuristic: if output contains "warning:" but no "error:", treat as OK.
+    if not error_lines:
+        warning_lines = [ln for ln in output.splitlines() if ": warning:" in ln]
+        if warning_lines:
+            return True, None  # warnings-only — old BCC quirk
+        # Real failure with no recognizable error pattern
+        msg = output.splitlines()[-3:] if output else [f"exit code {result.returncode}"]
+        return False, "; ".join(ln.strip() for ln in msg if ln.strip())
+
+    # Has ": error:" lines
+    return False, "; ".join(error_lines[:3])
 
 
 # ---------------------------------------------------------------------------
 # Test configurations: (tool, cflags, description)
 # ---------------------------------------------------------------------------
 
-# Required configs — must always compile. These use the minimal cflags that
-# main() always passes. Optional features (TRACK_THREADS, TRACK_COW, etc.)
-# depend on kernel/BCC version and are tested separately if available.
+# Required configs — must always compile. These include default-on features
+# (TRACK_THREADS, TRACK_COW, TRACK_PROT) since users must explicitly opt out.
+# A regression in these would affect all users.
 REQUIRED_CONFIGS = [
-    ("box64_dynarec.py", [
-        "-DCHURN_THRESHOLD_NS=1000000000ULL",
-        "-DHASH_CAPACITY=524288",
-    ], "dynarec core"),
-
-    ("box64_dynarec.py", [
-        "-DCHURN_THRESHOLD_NS=1000000000ULL",
-        "-DHASH_CAPACITY=524288",
-        "-DFILTER_PID=1234",
-    ], "dynarec with pid filter"),
-
-    ("box64_memleak.py", [
-        "-DHASH_CAPACITY=524288",
-    ], "memleak core"),
-
-    ("box64_memleak.py", [
-        "-DHASH_CAPACITY=524288",
-        "-DFILTER_PID=1234",
-    ], "memleak with pid filter"),
-
-    ("box64_steam.py", [
-        "-DCHURN_THRESHOLD_NS=1000000000ULL",
-        "-DHASH_CAPACITY=524288",
-    ], "steam core"),
-
-    ("box64_steam.py", [
-        "-DCHURN_THRESHOLD_NS=1000000000ULL",
-        "-DHASH_CAPACITY=524288",
-        "-DFILTER_PID=1234",
-    ], "steam with pid filter"),
-]
-
-# Optional configs — compile errors are reported but don't fail CI.
-# These use #ifdef-gated features that may hit LLVM backend limitations
-# on older kernels/BCC versions.
-OPTIONAL_CONFIGS = [
     ("box64_dynarec.py", [
         "-DCHURN_THRESHOLD_NS=1000000000ULL",
         "-DHASH_CAPACITY=524288",
         "-DTRACK_PROT",
         "-DTRACK_THREADS",
         "-DTRACK_COW",
-    ], "dynarec all features"),
+    ], "dynarec core (default features)"),
+
+    ("box64_dynarec.py", [
+        "-DCHURN_THRESHOLD_NS=1000000000ULL",
+        "-DHASH_CAPACITY=524288",
+        "-DTRACK_PROT",
+        "-DTRACK_THREADS",
+        "-DTRACK_COW",
+        "-DFILTER_PID=1234",
+    ], "dynarec with pid filter"),
 
     ("box64_memleak.py", [
         "-DHASH_CAPACITY=524288",
-        "-DCAPTURE_STACKS",
-        "-DTRACK_MMAP",
-        "-DTRACK_32BIT",
         "-DTRACK_THREADS",
         "-DTRACK_COW",
-    ], "memleak all features"),
+    ], "memleak core (default features)"),
+
+    ("box64_memleak.py", [
+        "-DHASH_CAPACITY=524288",
+        "-DTRACK_THREADS",
+        "-DTRACK_COW",
+        "-DFILTER_PID=1234",
+    ], "memleak with pid filter"),
 
     ("box64_steam.py", [
         "-DCHURN_THRESHOLD_NS=1000000000ULL",
@@ -166,7 +146,34 @@ OPTIONAL_CONFIGS = [
         "-DTRACK_MMAP",
         "-DTRACK_THREADS",
         "-DTRACK_COW",
-    ], "steam all features"),
+    ], "steam core (default features)"),
+
+    ("box64_steam.py", [
+        "-DCHURN_THRESHOLD_NS=1000000000ULL",
+        "-DHASH_CAPACITY=524288",
+        "-DTRACK_MEM",
+        "-DTRACK_DYNAREC",
+        "-DTRACK_PROT",
+        "-DTRACK_BLOCK_DETAIL",
+        "-DTRACK_MMAP",
+        "-DTRACK_THREADS",
+        "-DTRACK_COW",
+        "-DFILTER_PID=1234",
+    ], "steam with pid filter"),
+]
+
+# Optional configs — compile errors are reported but don't fail CI.
+# These use truly opt-in features that may hit LLVM backend limitations
+# on older kernels/BCC versions.
+OPTIONAL_CONFIGS = [
+    ("box64_memleak.py", [
+        "-DHASH_CAPACITY=524288",
+        "-DCAPTURE_STACKS",
+        "-DTRACK_MMAP",
+        "-DTRACK_32BIT",
+        "-DTRACK_THREADS",
+        "-DTRACK_COW",
+    ], "memleak all features"),
 
     ("box64_steam.py", [
         "-DCHURN_THRESHOLD_NS=1000000000ULL",
