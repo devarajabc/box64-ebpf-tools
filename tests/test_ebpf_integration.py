@@ -184,6 +184,12 @@ def check_dynarec(box64_bin, test_bins):
     ok = len(errors) == 0
     if ok:
         print(f"  PASS  box64_dynarec.py (all assertions passed)")
+    else:
+        # Dump stderr for debugging probe attachment issues
+        if stderr.strip():
+            print(f"  DEBUG stderr ({len(stderr)} chars):")
+            for line in stderr.strip().splitlines()[:30]:
+                print(f"         {line}")
     return ok, errors
 
 
