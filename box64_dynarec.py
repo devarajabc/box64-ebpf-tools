@@ -194,17 +194,38 @@ def _patch_bcc_uretprobe():
 
 def _bcc_has_atomic_increment():
     """Probe whether this BCC version supports table.atomic_increment()."""
-    import contextlib
-    import io
     try:
-        with contextlib.redirect_stderr(io.StringIO()):
-            BPF(text=r"""
-                BPF_HISTOGRAM(t, int, 2);
-                int test(void *ctx) { int k = 0; t.atomic_increment(k); return 0; }
-            """)
+        BPF(text=r"""
+            BPF_HISTOGRAM(t, int, 2);
+            int test(void *ctx) { int k = 0; t.atomic_increment(k); return 0; }
+        """)
         return True
     except Exception:
         return False
+
+
+def _rewrite_atomic_increment(bpf_text):
+    """Replace table.atomic_increment(key) for old BCC versions.
+
+    Old BCC's rewriter can't process BCC map helpers inside C macros,
+    so we do the replacement at the Python string level instead.
+    """
+    import re
+
+    def _replace(m):
+        table = m.group(1)
+        key = m.group(2)
+        return (
+            f'{{ u64 _ai_zero = 0, *_ai_val = '
+            f'{table}.lookup_or_init(&({key}), &_ai_zero); '
+            f'if (_ai_val) __sync_fetch_and_add(_ai_val, 1); }}'
+        )
+
+    return re.sub(
+        r'(\w+)\.atomic_increment\((\w+)\)',
+        _replace,
+        bpf_text,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -403,12 +424,7 @@ int dynarec_alloc_return(struct pt_regs *ctx) {
 
     // Size histogram
     int bucket = log2_u64(p->size);
-#ifdef HAS_ATOMIC_INCREMENT
     alloc_sizes.atomic_increment(bucket);
-#else
-    { u64 _zero = 0, *_val = alloc_sizes.lookup_or_init(&bucket, &_zero);
-      if (_val) __sync_fetch_and_add(_val, 1); }
-#endif
 #ifdef TRACK_THREADS
     update_thread_alloc(p->size);
 #endif
@@ -444,12 +460,7 @@ int dynarec_free_entry(struct pt_regs *ctx) {
 
     // Lifetime histogram (log2 of nanoseconds)
     int lt_bucket = log2_u64(lifetime);
-#ifdef HAS_ATOMIC_INCREMENT
     block_lifetimes.atomic_increment(lt_bucket);
-#else
-    { u64 _zero = 0, *_val = block_lifetimes.lookup_or_init(&lt_bucket, &_zero);
-      if (_val) __sync_fetch_and_add(_val, 1); }
-#endif
 
     // Churn detection: block freed within threshold
     u64 churn_ns = CHURN_THRESHOLD_NS;
@@ -789,14 +800,16 @@ def main():
     track_cow = not args.no_cow
     if track_cow:
         cflags.append("-DTRACK_COW")
-    if _bcc_has_atomic_increment():
-        cflags.append("-DHAS_ATOMIC_INCREMENT")
-
     _clear_stale_uprobes(binary)
     _patch_bcc_uretprobe()
 
+    bpf_src = BPF_PROGRAM
+    if not _bcc_has_atomic_increment():
+        print("[*] Old BCC detected: rewriting atomic_increment calls")
+        bpf_src = _rewrite_atomic_increment(bpf_src)
+
     print(f"[*] Attaching uprobes to {binary} ...")
-    b = BPF(text=BPF_PROGRAM, cflags=cflags)
+    b = BPF(text=bpf_src, cflags=cflags)
 
     # Core probes
     b.attach_uprobe(name=binary, sym="AllocDynarecMap", fn_name="dynarec_alloc_entry")

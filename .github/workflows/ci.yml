@@ -19,54 +19,42 @@ jobs:
         run: python3 -m py_compile box64_dynarec.py box64_memleak.py box64_steam.py
       - name: Lint
         run: ruff check box64_dynarec.py box64_memleak.py box64_steam.py tests/
-      - name: Lint - no unguarded atomic_increment
-        run: |
-          python3 -c "
-          import re, sys
-          TOOLS = ['box64_dynarec.py', 'box64_memleak.py', 'box64_steam.py']
-          ALLOWED = [
-              r'^\s*#ifdef HAS_ATOMIC_INCREMENT',
-              r'\.atomic_increment\(',
-              r't\.atomic_increment',
-              r'_bcc_has_atomic_increment',
-              r'// .*atomic_increment',
-              r'\".*atomic_increment',
-          ]
-          ok = True
-          for tool in TOOLS:
-              for i, line in enumerate(open(tool), 1):
-                  if 'atomic_increment' not in line:
-                      continue
-                  if any(re.search(p, line) for p in ALLOWED):
-                      continue
-                  print(f'ERROR {tool}:{i}: unguarded atomic_increment: {line.strip()}')
-                  ok = False
-          sys.exit(0 if ok else 1)
-          "
       - name: Unit tests
         run: pytest tests/ -v --tb=short --ignore=tests/test_upstream_compat.py
 
   bcc-compat:
-    name: BCC fallback path compile test
+    name: BCC atomic_increment fallback test
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: Install BCC
         run: sudo apt-get update && sudo apt-get install -y python3-bpfcc
-      - name: Test fallback path compiles
+      - name: Test rewritten BPF C compiles
         run: |
           sudo python3 -c "
+          import re
+
+          def _rewrite_atomic_increment(bpf_text):
+              def _replace(m):
+                  table, key = m.group(1), m.group(2)
+                  return (
+                      f'{{ u64 _ai_zero = 0, *_ai_val = '
+                      f'{table}.lookup_or_init(&({key}), &_ai_zero); '
+                      f'if (_ai_val) __sync_fetch_and_add(_ai_val, 1); }}')
+              return re.sub(r'(\w+)\.atomic_increment\((\w+)\)', _replace, bpf_text)
+
           from bcc import BPF
-          BPF(text=r'''
+          src = r'''
               BPF_HISTOGRAM(test_hist, int, 64);
               int test(void *ctx) {
                   int bucket = 3;
-                  { u64 _zero = 0, *_val = test_hist.lookup_or_init(&bucket, &_zero);
-                    if (_val) __sync_fetch_and_add(_val, 1); }
+                  test_hist.atomic_increment(bucket);
                   return 0;
               }
-          ''')
-          print('PASS: fallback path compiles')
+          '''
+          rewritten = _rewrite_atomic_increment(src)
+          BPF(text=rewritten)
+          print('PASS: rewritten BPF C compiles on this BCC')
           "
       - name: Test BCC detection probe
         run: |
