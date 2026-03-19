@@ -1,37 +1,45 @@
-"""Test HIST_INCREMENT macro for both old and new BCC code paths."""
+"""Test inline #ifdef atomic_increment fallback for both old and new BCC."""
 import pytest
 
-MACRO_NEW = """
+BPF_NEW = """
 #define HAS_ATOMIC_INCREMENT 1
-#define HIST_INCREMENT(table, key) table.atomic_increment(key)
-"""
-
-MACRO_OLD = r"""
-#define HIST_INCREMENT(table, key) \
-    { u64 _zero = 0, *_val = table.lookup_or_init(&(key), &_zero); \
-      if (_val) __sync_fetch_and_add(_val, 1); }
-"""
-
-BPF_TEMPLATE = """
-{macro}
 BPF_HISTOGRAM(test_hist, int, 64);
 
-int test_probe(void *ctx) {{
+int test_probe(void *ctx) {
     int bucket = 3;
-    HIST_INCREMENT(test_hist, bucket);
+#ifdef HAS_ATOMIC_INCREMENT
+    test_hist.atomic_increment(bucket);
+#else
+    { u64 _zero = 0, *_val = test_hist.lookup_or_init(&bucket, &_zero);
+      if (_val) __sync_fetch_and_add(_val, 1); }
+#endif
     return 0;
-}}
+}
+"""
+
+BPF_OLD = """
+BPF_HISTOGRAM(test_hist, int, 64);
+
+int test_probe(void *ctx) {
+    int bucket = 3;
+#ifdef HAS_ATOMIC_INCREMENT
+    test_hist.atomic_increment(bucket);
+#else
+    { u64 _zero = 0, *_val = test_hist.lookup_or_init(&bucket, &_zero);
+      if (_val) __sync_fetch_and_add(_val, 1); }
+#endif
+    return 0;
+}
 """
 
 
 @pytest.fixture(params=["new", "old"], ids=["atomic_increment", "fallback"])
 def bpf_text(request):
-    macro = MACRO_NEW if request.param == "new" else MACRO_OLD
-    return BPF_TEMPLATE.format(macro=macro)
+    return BPF_NEW if request.param == "new" else BPF_OLD
 
 
 def test_hist_increment_compiles(bpf_text):
-    """Both HIST_INCREMENT paths must produce BPF C that compiles."""
+    """Both ifdef paths must produce BPF C that compiles."""
     try:
         from bcc import BPF
     except ImportError:
@@ -46,12 +54,15 @@ def test_hist_increment_compiles(bpf_text):
 
 
 def _bcc_has_atomic_increment():
+    import io
+    import contextlib
     try:
         from bcc import BPF
-        BPF(text=r"""
-            BPF_HISTOGRAM(t, int, 2);
-            int test(void *ctx) { int k = 0; t.atomic_increment(k); return 0; }
-        """)
+        with contextlib.redirect_stderr(io.StringIO()):
+            BPF(text=r"""
+                BPF_HISTOGRAM(t, int, 2);
+                int test(void *ctx) { int k = 0; t.atomic_increment(k); return 0; }
+            """)
         return True
     except Exception:
         return False

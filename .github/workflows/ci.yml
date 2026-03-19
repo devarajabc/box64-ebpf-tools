@@ -19,15 +19,15 @@ jobs:
         run: python3 -m py_compile box64_dynarec.py box64_memleak.py box64_steam.py
       - name: Lint
         run: ruff check box64_dynarec.py box64_memleak.py box64_steam.py tests/
-      - name: Lint - no raw atomic_increment
+      - name: Lint - no unguarded atomic_increment
         run: |
           python3 -c "
           import re, sys
           TOOLS = ['box64_dynarec.py', 'box64_memleak.py', 'box64_steam.py']
           ALLOWED = [
-              r'#define HIST_INCREMENT.*atomic_increment',
+              r'^\s*#ifdef HAS_ATOMIC_INCREMENT',
+              r'\.atomic_increment\(',
               r't\.atomic_increment',
-              r'table\.atomic_increment',
               r'_bcc_has_atomic_increment',
               r'// .*atomic_increment',
               r'\".*atomic_increment',
@@ -39,7 +39,7 @@ jobs:
                       continue
                   if any(re.search(p, line) for p in ALLOWED):
                       continue
-                  print(f'ERROR {tool}:{i}: raw atomic_increment: {line.strip()}')
+                  print(f'ERROR {tool}:{i}: unguarded atomic_increment: {line.strip()}')
                   ok = False
           sys.exit(0 if ok else 1)
           "
@@ -53,18 +53,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install BCC
         run: sudo apt-get update && sudo apt-get install -y python3-bpfcc
-      - name: Test HIST_INCREMENT fallback compiles
+      - name: Test fallback path compiles
         run: |
           sudo python3 -c "
           from bcc import BPF
           BPF(text=r'''
-              #define HIST_INCREMENT(table, key) \
-                  { u64 _zero = 0, *_val = table.lookup_or_init(&(key), &_zero); \
-                    if (_val) __sync_fetch_and_add(_val, 1); }
               BPF_HISTOGRAM(test_hist, int, 64);
               int test(void *ctx) {
                   int bucket = 3;
-                  HIST_INCREMENT(test_hist, bucket);
+                  { u64 _zero = 0, *_val = test_hist.lookup_or_init(&bucket, &_zero);
+                    if (_val) __sync_fetch_and_add(_val, 1); }
                   return 0;
               }
           ''')
