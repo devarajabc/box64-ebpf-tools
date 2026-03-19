@@ -324,54 +324,56 @@ def check_steam(box64_bin, test_bins):
         print(f"  stderr ({len(stderr)} chars): {stderr[:500]}")
         return False, errors
 
-    # fork count >= 1
+    # fork count >= 10 (steam_lifecycle does 10 forks)
     m = re.search(r"fork:\s+(\d+)", stdout)
     if m:
         count = int(m.group(1))
-        if count >= 1:
+        if count >= 10:
             print(f"  PASS  fork: {count}")
         else:
-            errors.append("fork count is 0")
-            print(f"  FAIL  fork count is 0")
+            errors.append(f"fork count is {count}, expected >= 10")
+            print(f"  FAIL  fork count is {count}, expected >= 10")
     else:
         errors.append("fork line not found")
         print(f"  FAIL  fork line not found")
 
-    # vfork count >= 1
+    # vfork count >= 10 (steam_lifecycle does 10 vforks)
     m = re.search(r"vfork:\s+(\d+)", stdout)
     if m:
         count = int(m.group(1))
-        if count >= 1:
+        if count >= 10:
             print(f"  PASS  vfork: {count}")
         else:
-            errors.append("vfork count is 0")
-            print(f"  FAIL  vfork count is 0")
+            errors.append(f"vfork count is {count}, expected >= 10")
+            print(f"  FAIL  vfork count is {count}, expected >= 10")
     else:
         errors.append("vfork line not found")
         print(f"  FAIL  vfork line not found")
 
-    # exec (all) count >= 2
+    # exec (all) count >= 10 (20 expected: 10 fork + 10 vfork children each exec)
     m = re.search(r"exec \(all\):\s+(\d+)", stdout)
     if m:
         count = int(m.group(1))
-        if count >= 2:
+        if count >= 10:
             print(f"  PASS  exec (all): {count}")
         else:
-            errors.append(f"exec (all) count is {count}, expected >= 2")
-            print(f"  FAIL  exec (all) count is {count}, expected >= 2")
+            errors.append(f"exec (all) count is {count}, expected >= 10")
+            print(f"  FAIL  exec (all) count is {count}, expected >= 10")
     else:
         errors.append("exec (all) line not found")
         print(f"  FAIL  exec (all) line not found")
 
-    # NewBox64Context count >= 3
+    # NewBox64Context: exact count = 20 exec'd children + 1 initial context per binary
+    # steam_lifecycle creates 10 fork + 10 vfork children, each exec's into a worker
+    expected_contexts = 20 + len(test_bins)
     m = re.search(r"NewBox64Context:\s+(\d+)", stdout)
     if m:
         count = int(m.group(1))
-        if count >= 3:
-            print(f"  PASS  NewBox64Context: {count}")
+        if count == expected_contexts:
+            print(f"  PASS  NewBox64Context: {count} (expected {expected_contexts})")
         else:
-            errors.append(f"NewBox64Context count is {count}, expected >= 3")
-            print(f"  FAIL  NewBox64Context count is {count}, expected >= 3")
+            errors.append(f"NewBox64Context count is {count}, expected {expected_contexts}")
+            print(f"  FAIL  NewBox64Context count is {count}, expected {expected_contexts}")
     else:
         errors.append("NewBox64Context line not found")
         print(f"  FAIL  NewBox64Context line not found")
@@ -402,27 +404,27 @@ def check_steam(box64_bin, test_bins):
         errors.append("malloc line not found")
         print(f"  FAIL  malloc line not found")
 
-    # Box64 Process Tree with >= 2 distinct PIDs
+    # Box64 Process Tree with >= 10 distinct PIDs (20+ children created)
     if "Box64 Process Tree:" in stdout:
         # Extract PIDs from tree lines (format: "  PID NNNNN ...")
         tree_pids = set(re.findall(r"PID\s+(\d+)", stdout))
-        if len(tree_pids) >= 2:
+        if len(tree_pids) >= 10:
             print(f"  PASS  Box64 Process Tree: {len(tree_pids)} PIDs")
         else:
-            errors.append(f"Process tree has {len(tree_pids)} PIDs, expected >= 2")
-            print(f"  FAIL  Process tree has {len(tree_pids)} PIDs, expected >= 2")
+            errors.append(f"Process tree has {len(tree_pids)} PIDs, expected >= 10")
+            print(f"  FAIL  Process tree has {len(tree_pids)} PIDs, expected >= 10")
     else:
         errors.append("Box64 Process Tree section not found")
         print(f"  FAIL  Box64 Process Tree section not found")
 
-    # Per-PID Memory Breakdown with >= 2 PID sections
+    # Per-PID Memory Breakdown with >= 10 PID sections
     if "Per-PID Memory Breakdown:" in stdout:
         pid_sections = re.findall(r"PID\s+\d+", stdout)
-        if len(pid_sections) >= 2:
+        if len(pid_sections) >= 10:
             print(f"  PASS  Per-PID Memory Breakdown: {len(pid_sections)} PID sections")
         else:
-            errors.append(f"Per-PID Breakdown has {len(pid_sections)} sections, expected >= 2")
-            print(f"  FAIL  Per-PID Breakdown has {len(pid_sections)} sections, expected >= 2")
+            errors.append(f"Per-PID Breakdown has {len(pid_sections)} sections, expected >= 10")
+            print(f"  FAIL  Per-PID Breakdown has {len(pid_sections)} sections, expected >= 10")
     else:
         errors.append("Per-PID Memory Breakdown section not found")
         print(f"  FAIL  Per-PID Memory Breakdown section not found")

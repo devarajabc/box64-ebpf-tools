@@ -21,7 +21,7 @@ jobs:
       - name: Cross-compile custom test binaries (x86_64)
         run: |
           x86_64-linux-gnu-gcc -O1 -o /tmp/dynarec_stress tests/dynarec_stress.c
-          x86_64-linux-gnu-gcc -O1 -o /tmp/steam_lifecycle tests/steam_lifecycle.c
+          x86_64-linux-gnu-gcc -O1 -lpthread -o /tmp/steam_lifecycle tests/steam_lifecycle.c
           file /tmp/dynarec_stress /tmp/steam_lifecycle
 
       - name: Cache Box64 build

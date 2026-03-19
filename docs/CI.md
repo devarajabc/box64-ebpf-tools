@@ -100,14 +100,14 @@ Runs on `ubuntu-24.04-arm` (ARM64, kernel 6.8+, full eBPF/uprobe support).
 Three sources of x86_64 test binaries are used:
 
 1. **Custom stress test** (`tests/dynarec_stress.c`) — cross-compiled to x86_64 on the ARM64 runner. Contains hot loops and multiple functions specifically designed to force DynaRec JIT block allocation.
-2. **Steam lifecycle test** (`tests/steam_lifecycle.c`) — cross-compiled to x86_64. A multi-process binary that calls `fork()`, `vfork()`, and `execve()` to create a process tree, exercising Box64's wrapped libc (`my_fork`, `my_vfork`, `my_execve`). Creates this tree:
+2. **Steam lifecycle test** (`tests/steam_lifecycle.c`) — cross-compiled to x86_64 with `-lpthread`. A multi-process, multi-threaded binary that exercises Box64's wrapped libc (`my_fork`, `my_vfork`, `my_execve`, `my_execvp`, `my_execv`, `my_pthread_create`). Creates this tree:
    ```
-   box64 steam_lifecycle          (parent: fork + vfork + hot loops)
-   +-- box64 steam_lifecycle --child   (fork child: hot loops + exec)
-   |   +-- box64 steam_lifecycle --worker 1   (exec'd worker)
-   +-- box64 steam_lifecycle --vchild  (vfork child: immediate exec)
-       +-- box64 steam_lifecycle --worker 1   (exec'd worker)
+   box64 steam_lifecycle                         (parent)
+   +-- 10 fork children -> exec -> worker        (rotating execve/execvp/execv)
+   +-- 10 vfork children -> execve -> worker
+   +-- 4 pthreads (brief hot loops)
    ```
+   This generates 10 forks, 10 vforks, 20 execs (3 variants), and 4 pthread_create calls, ensuring broad probe coverage.
 3. **Box64's own test suite** (`test01`–`test33`) — pre-compiled x86_64 ELF binaries from the upstream Box64 repo, auto-discovered via `--test-dir`.
 
 All binaries are run in sequence during each tool test. Individual binary failures or timeouts (10s per binary) are tolerated — our eBPF tools still collect probe data from whatever activity occurred.
@@ -136,14 +136,14 @@ Assertions for `box64_memleak.py`:
 
 Assertions for `box64_steam.py` (default flags — all features enabled):
 - Output contains `FINAL REPORT`
-- `fork` count >= 1
-- `vfork` count >= 1
-- `exec (all)` count >= 2
-- `NewBox64Context` count >= 3
+- `fork` count >= 10
+- `vfork` count >= 10
+- `exec (all)` count >= 10
+- `NewBox64Context` count == 20 + number of test binaries (exact check)
 - `AllocDynarecMap` count > 0
 - `malloc` count > 0
-- `Box64 Process Tree` present with >= 2 distinct PIDs
-- `Per-PID Memory Breakdown` present with >= 2 PID sections
+- `Box64 Process Tree` present with >= 10 distinct PIDs
+- `Per-PID Memory Breakdown` present with >= 10 PID sections
 - No Python tracebacks
 
 Assertions for `box64_steam.py` (PC sampling — `--sample-freq 4999`):

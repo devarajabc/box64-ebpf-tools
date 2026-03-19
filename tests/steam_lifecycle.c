@@ -1,27 +1,25 @@
 /*
- * Multi-process x86_64 test binary to exercise Box64's fork/vfork/exec
+ * Multi-process x86_64 test binary to exercise Box64's fork/vfork/exec/thread
  * lifecycle tracking in box64_steam.py.
  *
- * When Box64 emulates this on ARM64, fork/vfork/execve go through Box64's
- * wrapped libc (my_fork, my_vfork, my_execve), triggering the corresponding
- * eBPF uprobes.
+ * When Box64 emulates this on ARM64, fork/vfork/execve/execvp/execv go through
+ * Box64's wrapped libc (my_fork, my_vfork, my_execve, my_execvp, my_execv),
+ * and pthread_create goes through my_pthread_create — triggering the
+ * corresponding eBPF uprobes.
  *
  * Modes (selected by argv[1]):
- *   (none)      Parent: fork -> child execs --child; vfork -> child execs
- *               --vchild; then runs hot loops for DynaRec activity.
- *   --child     Fork child: runs hot loops, then execve(argv[0], "--worker").
- *   --vchild    Vfork child: immediately execve(argv[0], "--worker").
- *   --worker N  Worker: runs hot loops for N seconds (default 1).
+ *   (none)      Parent: 10 forks (rotating exec variants), 10 vforks,
+ *               4 pthreads, then hot loops.
+ *   --worker    Worker: brief hot loops (~100ms), then exit.
  *
  * Process tree created:
- *   box64 steam_lifecycle          (parent)
- *   +-- box64 steam_lifecycle --child
- *   |   +-- box64 steam_lifecycle --worker 1
- *   +-- box64 steam_lifecycle --vchild
- *       +-- box64 steam_lifecycle --worker 1
+ *   box64 steam_lifecycle                      (parent)
+ *   +-- 10 fork children -> exec -> worker     (rotating execve/execvp/execv)
+ *   +-- 10 vfork children -> execve -> worker
+ *   +-- 4 pthreads (brief hot loops)
  *
  * Cross-compile for ARM64 CI:
- *   x86_64-linux-gnu-gcc -O1 -o /tmp/steam_lifecycle tests/steam_lifecycle.c
+ *   x86_64-linux-gnu-gcc -O1 -lpthread -o /tmp/steam_lifecycle tests/steam_lifecycle.c
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +27,11 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <pthread.h>
+
+#define NUM_FORKS   10
+#define NUM_VFORKS  10
+#define NUM_THREADS  4
 
 volatile int sink;
 
@@ -85,80 +88,108 @@ void run_hot_loops(int seconds) {
     }
 }
 
-/* --worker N: run hot loops for N seconds */
-int do_worker(int argc, char *argv[]) {
-    int duration = 1;
-    if (argc >= 3)
-        duration = atoi(argv[2]);
-    if (duration < 1)
-        duration = 1;
-    printf("steam_lifecycle worker (pid=%d): running for %ds\n",
-           getpid(), duration);
-    run_hot_loops(duration);
+/* Run brief hot loops (~100ms) for workers and threads */
+void run_hot_loops_brief(void) {
+    struct timespec start, now;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    while (1) {
+        for (int i = 0; i < 100; i++) {
+            sink = sum_squares(500);
+            sink += fibonacci(40);
+            sink += (int)(taylor_sin(1.0) * 1000);
+            sink += collatz_steps(27);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000 +
+                          (now.tv_nsec - start.tv_nsec) / 1000000;
+        if (elapsed_ms >= 100)
+            break;
+    }
+}
+
+/* --worker: brief hot loops then exit */
+int do_worker(void) {
+    printf("steam_lifecycle worker (pid=%d): running\n", getpid());
+    run_hot_loops_brief();
     printf("steam_lifecycle worker (pid=%d): done\n", getpid());
     return 0;
 }
 
-/* --child: run hot loops, then exec into --worker */
-int do_child(char *self) {
-    printf("steam_lifecycle child (pid=%d): hot loops then exec\n", getpid());
-    run_hot_loops(1);
-    char *new_argv[] = {self, "--worker", "1", NULL};
-    execve(self, new_argv, NULL);
-    /* If execve fails, try execvp as fallback */
-    perror("execve failed");
-    return 1;
+/* Thread function: brief hot loops */
+void *thread_fn(void *arg) {
+    int id = *(int *)arg;
+    printf("steam_lifecycle thread %d (pid=%d): running\n", id, getpid());
+    run_hot_loops_brief();
+    printf("steam_lifecycle thread %d: done\n", id);
+    return NULL;
 }
 
-/* --vchild: immediately exec into --worker (no hot loops — vfork restriction) */
-int do_vchild(char *self) {
-    /* After vfork, we must not modify parent state — go straight to exec */
-    char *new_argv[] = {self, "--worker", "1", NULL};
-    execve(self, new_argv, NULL);
-    perror("execve failed in vchild");
-    _exit(1);
-    return 1;  /* unreachable */
-}
-
-/* Parent mode: fork, vfork, then hot loops */
+/* Parent mode: multiple forks, vforks, pthreads, then hot loops */
 int do_parent(char *self, int loop_seconds) {
     pid_t pid;
 
     printf("steam_lifecycle parent (pid=%d): starting\n", getpid());
 
-    /* Fork -> child runs --child mode */
-    pid = fork();
-    if (pid < 0) {
-        perror("fork");
-        return 1;
+    /* --- Forks (rotating exec variants) --- */
+    for (int i = 0; i < NUM_FORKS; i++) {
+        pid = fork();
+        if (pid < 0) {
+            perror("fork");
+            continue;
+        }
+        if (pid == 0) {
+            char *argv[] = {self, "--worker", NULL};
+            char *envp[] = {NULL};
+            switch (i % 3) {
+                case 0: execve(self, argv, envp); break;
+                case 1: execvp(self, argv); break;
+                case 2: execv(self, argv); break;
+            }
+            perror("exec failed in fork child");
+            _exit(1);
+        }
+        printf("steam_lifecycle parent: forked child %d pid=%d (exec variant %d)\n",
+               i, pid, i % 3);
+        usleep(10000);  /* 10ms stagger */
     }
-    if (pid == 0) {
-        return do_child(self);
-    }
-    printf("steam_lifecycle parent: forked child pid=%d\n", pid);
 
-    /* Brief pause to let fork child start before vfork */
-    usleep(100000);  /* 100ms */
+    /* --- Vforks --- */
+    for (int i = 0; i < NUM_VFORKS; i++) {
+        pid = vfork();
+        if (pid < 0) {
+            perror("vfork");
+            continue;
+        }
+        if (pid == 0) {
+            char *argv[] = {self, "--worker", NULL};
+            char *envp[] = {NULL};
+            execve(self, argv, envp);
+            _exit(1);
+        }
+        printf("steam_lifecycle parent: vforked child %d pid=%d\n", i, pid);
+        usleep(10000);  /* 10ms stagger */
+    }
 
-    /* Vfork -> child runs --vchild mode */
-    pid = vfork();
-    if (pid < 0) {
-        perror("vfork");
-        return 1;
+    /* --- Threads --- */
+    pthread_t tids[NUM_THREADS];
+    int targs[NUM_THREADS];
+    for (int i = 0; i < NUM_THREADS; i++) {
+        targs[i] = i;
+        if (pthread_create(&tids[i], NULL, thread_fn, &targs[i]) != 0) {
+            perror("pthread_create");
+        }
     }
-    if (pid == 0) {
-        do_vchild(self);
-        _exit(1);  /* unreachable if exec succeeds */
-    }
-    printf("steam_lifecycle parent: vforked child pid=%d\n", pid);
 
     /* Parent hot loops to generate DynaRec activity */
     printf("steam_lifecycle parent: running hot loops for %ds\n", loop_seconds);
     run_hot_loops(loop_seconds);
 
-    /* Wait for all children */
-    int status;
-    while (wait(&status) > 0)
+    /* Join threads */
+    for (int i = 0; i < NUM_THREADS; i++)
+        pthread_join(tids[i], NULL);
+
+    /* Wait for all child processes */
+    while (wait(NULL) > 0)
         ;
 
     printf("steam_lifecycle parent: done\n");
@@ -167,13 +198,7 @@ int do_parent(char *self, int loop_seconds) {
 
 int main(int argc, char *argv[]) {
     if (argc >= 2 && strcmp(argv[1], "--worker") == 0) {
-        return do_worker(argc, argv);
-    }
-    if (argc >= 2 && strcmp(argv[1], "--child") == 0) {
-        return do_child(argv[0]);
-    }
-    if (argc >= 2 && strcmp(argv[1], "--vchild") == 0) {
-        return do_vchild(argv[0]);
+        return do_worker();
     }
 
     /* Parent mode — optional duration argument */
