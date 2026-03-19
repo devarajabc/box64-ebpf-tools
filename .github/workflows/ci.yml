@@ -16,9 +16,9 @@ jobs:
       - name: Install dev dependencies
         run: pip install -r requirements-dev.txt
       - name: Syntax check
-        run: python3 -m py_compile box64_dynarec.py box64_memleak.py box64_steam.py
+        run: python3 -m py_compile box64_dynarec.py box64_memleak.py box64_steam.py box64_common.py
       - name: Lint
-        run: ruff check box64_dynarec.py box64_memleak.py box64_steam.py tests/
+        run: ruff check box64_dynarec.py box64_memleak.py box64_steam.py box64_common.py tests/
       - name: Unit tests
         run: pytest tests/ -v --tb=short --ignore=tests/test_upstream_compat.py
 
