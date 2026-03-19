@@ -63,6 +63,7 @@ Press **Ctrl+C** when done to get the full report.
 - **[`docs/box64_steam.md`](docs/box64_steam.md)** -- Options, output format, required symbols for the multi-process Steam tracer.
 - **[`docs/HOW_BOX64_WORKS.md`](docs/HOW_BOX64_WORKS.md)** -- How Box64 executes an x86_64 binary, from ELF loading through DynaRec JIT to syscall translation.
 - **[`docs/BOX64_FORK_EXEC_MEMORY.md`](docs/BOX64_FORK_EXEC_MEMORY.md)** -- Box64's fork/exec/clone mechanisms, custom allocator, DynaRec JIT block management, and pressure-vessel Steam containers.
+- **[`docs/BOX64_STEAM_INTERNALS.md`](docs/BOX64_STEAM_INTERNALS.md)** -- How Box64's pressure-vessel shim works: Steam detection, environment variable translation, D-Bus bypass, multi-process re-invocation model.
 
 ## Notes
 
