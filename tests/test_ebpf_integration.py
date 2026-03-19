@@ -88,26 +88,30 @@ def run_tool_test(tool_script, tool_args, box64_bin, test_bins,
             os.unlink(stdout_path)
             os.unlink(stderr_path)
             print(f"  Tool exited early (code {tool_proc.returncode})")
-            return stdout, stderr, tool_proc.returncode
+            return stdout, stderr, tool_proc.returncode, []
         print(f"  WARNING: Tool not ready after {ready_timeout}s, proceeding anyway")
 
     # Run Box64 with each test binary
     ran = 0
+    bin_results = []
     for test_bin in test_bins:
         name = os.path.basename(test_bin)
         try:
             result = subprocess.run(
                 [box64_bin, test_bin],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,
                 text=True,
                 timeout=BOX64_PER_BINARY_TIMEOUT,
             )
             status = f"exit {result.returncode}"
+            bin_results.append((name, result.stdout, result.returncode))
         except subprocess.TimeoutExpired:
             status = "TIMEOUT"
+            bin_results.append((name, "", -1))
         except OSError as e:
             status = f"ERROR: {e}"
+            bin_results.append((name, "", -1))
         print(f"    {name}: {status}")
         ran += 1
 
@@ -137,7 +141,7 @@ def run_tool_test(tool_script, tool_args, box64_bin, test_bins,
     os.unlink(stdout_path)
     os.unlink(stderr_path)
 
-    return stdout, stderr, tool_proc.returncode
+    return stdout, stderr, tool_proc.returncode, bin_results
 
 
 def check_no_tracebacks(output, label):
@@ -160,7 +164,7 @@ def check_dynarec(box64_bin, test_bins):
     """Test box64_dynarec.py against live Box64 processes."""
     print("\n--- box64_dynarec.py ---")
 
-    stdout, stderr, rc = run_tool_test(
+    stdout, stderr, rc, _bin_results = run_tool_test(
         "box64_dynarec.py",
         ["-i", "1"],
         box64_bin, test_bins,
@@ -238,7 +242,7 @@ def check_memleak(box64_bin, test_bins):
     """Test box64_memleak.py against live Box64 processes."""
     print("\n--- box64_memleak.py ---")
 
-    stdout, stderr, rc = run_tool_test(
+    stdout, stderr, rc, _bin_results = run_tool_test(
         "box64_memleak.py",
         ["-i", "1"],
         box64_bin, test_bins,
@@ -295,7 +299,7 @@ def check_steam(box64_bin, test_bins):
     """Test box64_steam.py against live Box64 processes with multi-process workload."""
     print("\n--- box64_steam.py ---")
 
-    stdout, stderr, rc = run_tool_test(
+    stdout, stderr, rc, _bin_results = run_tool_test(
         "box64_steam.py",
         ["-i", "2"],
         box64_bin, test_bins,
@@ -450,7 +454,7 @@ def check_steam_sampling(box64_bin, test_bins):
     """Test box64_steam.py with PC sampling (--sample-freq) enabled."""
     print("\n--- box64_steam.py (PC sampling) ---")
 
-    stdout, stderr, rc = run_tool_test(
+    stdout, stderr, rc, _bin_results = run_tool_test(
         "box64_steam.py",
         ["-i", "2", "--sample-freq", "4999"],
         box64_bin, test_bins,
@@ -515,6 +519,68 @@ def check_steam_sampling(box64_bin, test_bins):
             print(f"  DEBUG stderr ({len(stderr)} chars):")
             for line in stderr.strip().splitlines()[:30]:
                 print(f"         {line}")
+    return ok, errors
+
+
+def ref_path_for(test_bin):
+    """Derive refNN.txt path from testNN binary path."""
+    base = os.path.basename(test_bin)
+    m = re.match(r'test(\d+.*)', base)
+    if not m:
+        return None
+    ref = os.path.join(os.path.dirname(test_bin), f"ref{m.group(1)}.txt")
+    return ref if os.path.isfile(ref) else None
+
+
+def check_output_correctness(box64_bin, test_bins):
+    """Verify Box64 output matches ref files while eBPF uprobes are attached."""
+    print("\n--- Output correctness (uprobes attached) ---")
+
+    stdout, stderr, rc, bin_results = run_tool_test(
+        "box64_dynarec.py", ["-i", "1"],
+        box64_bin, test_bins,
+    )
+
+    errors = []
+    checked = 0
+    matched = 0
+
+    for name, bin_stdout, bin_rc in bin_results:
+        ref = ref_path_for(
+            next(tb for tb in test_bins if os.path.basename(tb) == name)
+        )
+        if ref is None:
+            continue
+        if bin_rc != 0:
+            print(f"    {name}: skipped (exit {bin_rc})")
+            continue
+
+        checked += 1
+        with open(ref) as f:
+            expected = f.read()
+
+        actual_lines = bin_stdout.rstrip().splitlines()
+        expected_lines = expected.rstrip().splitlines()
+
+        if actual_lines == expected_lines:
+            matched += 1
+        else:
+            errors.append(f"{name}: output differs from {os.path.basename(ref)}")
+            print(f"  FAIL  {name}: output differs")
+            # Show first diff
+            for i, (a, e) in enumerate(zip(actual_lines, expected_lines)):
+                if a != e:
+                    print(f"         line {i+1} expected: {e[:80]}")
+                    print(f"         line {i+1} actual:   {a[:80]}")
+                    break
+
+    print(f"  INFO  {matched}/{checked} binaries matched ref output")
+
+    ok = len(errors) == 0
+    if ok and checked > 0:
+        print(f"  PASS  Output correctness ({matched}/{checked} matched)")
+    elif checked == 0:
+        print(f"  SKIP  No testNN binaries with ref files found")
     return ok, errors
 
 
@@ -589,6 +655,19 @@ def main():
     else:
         failed += 1
         errors.extend(errs)
+
+    # Output correctness: only testNN binaries (from --test-dir) have ref files
+    testdir_bins = [tb for tb in test_bins
+                    if re.match(r'test\d+', os.path.basename(tb))]
+    if testdir_bins:
+        ok, errs = check_output_correctness(args.box64, testdir_bins)
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+            errors.extend(errs)
+    else:
+        print("\n  SKIP  Output correctness: no testNN binaries found")
 
     # Steam tests use specific binaries
     steam_bin = next(

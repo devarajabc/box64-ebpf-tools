@@ -152,6 +152,11 @@ Assertions for `box64_steam.py` (PC sampling — `--sample-freq 4999`):
 - `PC Sampling Profile` section present
 - No Python tracebacks
 
+Assertions for output correctness (runs `box64_dynarec.py` with uprobes attached):
+- For each testNN binary that exits 0 with a matching refNN.txt:
+  Box64's stdout must match the reference output exactly
+- Verifies eBPF instrumentation does not perturb Box64's emulation behavior
+
 All tools run with **default settings** (all features enabled). The tools auto-disable features if optional symbols are missing in the Box64 build.
 
 Estimated runtime: ~20–25 minutes (Box64 build: 5–8 min on first run, cached thereafter; tests: 8–12 min with all binaries and steam tests).
