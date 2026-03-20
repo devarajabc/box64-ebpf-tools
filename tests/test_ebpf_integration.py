@@ -178,6 +178,17 @@ def is_zero_size(s):
     return bool(re.match(r'^0(\.0+)?\s*B?$', s.strip()))
 
 
+def parse_fmt_size(s):
+    """Parse fmt_size() output back to approximate bytes."""
+    s = s.strip()
+    multipliers = {"TB": 1024**4, "GB": 1024**3, "MB": 1024**2, "KB": 1024, "B": 1}
+    for unit, mult in multipliers.items():
+        if s.endswith(unit):
+            val = float(s[:-len(unit)].strip())
+            return int(val * mult)
+    return 0
+
+
 def check_dynarec(box64_bin, test_bins):
     """Test box64_dynarec.py against live Box64 processes."""
     print("\n--- box64_dynarec.py ---")
@@ -232,10 +243,61 @@ def check_dynarec(box64_bin, test_bins):
         errors.append("Bytes allocated line not found")
         print(f"  FAIL  Bytes allocated line not found")
 
-    # FreeDynarecMap count (informational)
-    m = re.search(r"FreeDynarecMap:\s+(\d+)", stdout)
-    if m:
-        print(f"  INFO  FreeDynarecMap: {m.group(1)}")
+    # Bytes allocated sanity range [1 KB, 1 GB]
+    m_bytes = re.search(r"Bytes allocated:\s+(.+)", stdout)
+    if m_bytes:
+        alloc_bytes = parse_fmt_size(m_bytes.group(1).strip())
+        if 1024 <= alloc_bytes <= 1024**3:
+            print(f"  PASS  Bytes allocated in sane range: {m_bytes.group(1).strip()} ({alloc_bytes} bytes)")
+        else:
+            errors.append(f"Bytes allocated out of range: {alloc_bytes}")
+            print(f"  FAIL  Bytes allocated out of range: {alloc_bytes}")
+
+    # FreeDynarecMap <= AllocDynarecMap
+    m_alloc = re.search(r"AllocDynarecMap:\s+(\d+)", stdout)
+    m_free = re.search(r"FreeDynarecMap:\s+(\d+)", stdout)
+    if m_alloc and m_free:
+        alloc_count = int(m_alloc.group(1))
+        free_count = int(m_free.group(1))
+        if free_count <= alloc_count:
+            print(f"  PASS  FreeDynarecMap ({free_count}) <= AllocDynarecMap ({alloc_count})")
+        else:
+            errors.append(f"FreeDynarecMap ({free_count}) > AllocDynarecMap ({alloc_count})")
+            print(f"  FAIL  FreeDynarecMap ({free_count}) > AllocDynarecMap ({alloc_count})")
+    elif m_free:
+        print(f"  INFO  FreeDynarecMap: {m_free.group(1)}")
+
+    # Outstanding <= Bytes allocated
+    m_outstanding = re.search(r"Outstanding:\s+(.+)", stdout)
+    if m_outstanding and m_bytes:
+        outstanding_bytes = parse_fmt_size(m_outstanding.group(1).strip())
+        alloc_total = parse_fmt_size(m_bytes.group(1).strip())
+        if outstanding_bytes <= alloc_total:
+            print(f"  PASS  Outstanding ({outstanding_bytes}) <= Bytes allocated ({alloc_total})")
+        else:
+            errors.append(f"Outstanding ({outstanding_bytes}) > Bytes allocated ({alloc_total})")
+            print(f"  FAIL  Outstanding ({outstanding_bytes}) > Bytes allocated ({alloc_total})")
+
+    # Allocation size distribution section with histogram lines
+    if "Allocation size distribution:" in stdout:
+        # Histogram lines contain bracketed ranges like "[64, 128)"
+        hist_lines = re.findall(r"\[[\d,\s]+\).*\|", stdout)
+        if hist_lines:
+            print(f"  PASS  Allocation size distribution: {len(hist_lines)} histogram lines")
+        else:
+            print(f"  INFO  Allocation size distribution present but no histogram lines")
+    else:
+        print(f"  INFO  Allocation size distribution section not found")
+
+    # Block lifetime distribution section with histogram lines
+    if "Block lifetime distribution:" in stdout:
+        hist_lines = re.findall(r"\[[\d,\s]+\).*\|", stdout)
+        if hist_lines:
+            print(f"  PASS  Block lifetime distribution: {len(hist_lines)} histogram lines")
+        else:
+            print(f"  INFO  Block lifetime distribution present but no histogram lines")
+    else:
+        print(f"  INFO  Block lifetime distribution section not found")
 
     # Protection tracking (default-on)
     m = re.search(r"protectDB:\s+(\d+)\s+calls", stdout)
@@ -297,19 +359,156 @@ def check_memleak(box64_bin, test_bins):
         errors.append("Total mallocs line not found")
         print(f"  FAIL  Total mallocs line not found")
 
-    # Total frees (informational)
-    m = re.search(r"Total frees:\s+(\d+)", stdout)
-    if m:
-        print(f"  INFO  Total frees: {m.group(1)}")
+    # Total frees > 0
+    m_frees = re.search(r"Total frees:\s+(\d+)", stdout)
+    if m_frees:
+        free_count = int(m_frees.group(1))
+        if free_count > 0:
+            print(f"  PASS  Total frees: {free_count}")
+        else:
+            errors.append("Total frees count is 0")
+            print(f"  FAIL  Total frees count is 0")
+    else:
+        errors.append("Total frees line not found")
+        print(f"  FAIL  Total frees line not found")
 
-    # Bytes allocated (informational)
-    m = re.search(r"Bytes allocated:\s*(.+)", stdout)
-    if m:
-        print(f"  INFO  Bytes allocated: {m.group(1).strip()}")
+    # Bytes allocated > 0
+    m_bytes = re.search(r"Bytes allocated:\s*(.+)", stdout)
+    if m_bytes:
+        val = m_bytes.group(1).strip()
+        if is_zero_size(val):
+            errors.append("Bytes allocated is 0")
+            print(f"  FAIL  Bytes allocated is 0")
+        else:
+            print(f"  PASS  Bytes allocated: {val}")
+    else:
+        errors.append("Bytes allocated line not found")
+        print(f"  FAIL  Bytes allocated line not found")
+
+    # Outstanding allocations >= 0 (line present)
+    m_outstanding = re.search(r"Outstanding allocs:\s+(\d+)", stdout)
+    if m_outstanding:
+        outstanding = int(m_outstanding.group(1))
+        if outstanding >= 0:
+            print(f"  PASS  Outstanding allocs: {outstanding}")
+        else:
+            errors.append(f"Outstanding allocs negative: {outstanding}")
+            print(f"  FAIL  Outstanding allocs negative: {outstanding}")
+    else:
+        print(f"  INFO  Outstanding allocs line not found")
+
+    # Outstanding bytes >= 0 (line present)
+    m_outstanding_bytes = re.search(r"Outstanding bytes:\s*(.+)", stdout)
+    if m_outstanding_bytes:
+        val = m_outstanding_bytes.group(1).strip()
+        print(f"  PASS  Outstanding bytes: {val}")
+    else:
+        print(f"  INFO  Outstanding bytes line not found")
+
+    # No negative numeric values in the report (sanity check)
+    final_idx = stdout.find("FINAL REPORT")
+    if final_idx >= 0:
+        report = stdout[final_idx:]
+        neg_matches = re.findall(r'(?<![a-zA-Z_])-\d+', report)
+        if neg_matches:
+            errors.append(f"Negative values found in report: {neg_matches[:5]}")
+            print(f"  FAIL  Negative values in report: {neg_matches[:5]}")
+        else:
+            print(f"  PASS  No negative values in report")
 
     ok = len(errors) == 0
     if ok:
         print(f"  PASS  box64_memleak.py (all assertions passed)")
+    return ok, errors
+
+
+def check_memleak_leaker(box64_bin, leaker_bin):
+    """Test box64_memleak.py specifically against memleak_leaker binary.
+
+    memleak_leaker uses _exit(0) to skip cleanup, guaranteeing outstanding
+    customMalloc entries that the memleak tool must detect.
+    """
+    print("\n--- box64_memleak.py (memleak_leaker) ---")
+
+    stdout, stderr, rc, _bin_results = run_tool_test(
+        "box64_memleak.py",
+        ["-i", "1"],
+        box64_bin, [leaker_bin],
+    )
+
+    combined = stdout + "\n" + stderr
+    errors = []
+
+    if not check_no_tracebacks(combined, "memleak-leaker"):
+        errors.append("Python traceback detected")
+
+    for line in stdout.splitlines():
+        if line.startswith("[*]") or line.startswith("WARNING"):
+            print(f"  TOOL  {line}")
+
+    if "FINAL REPORT" not in stdout:
+        errors.append("FINAL REPORT not found in output")
+        print(f"  FAIL  memleak-leaker: FINAL REPORT not found")
+        print(f"  stdout ({len(stdout)} chars): {stdout[:500]}")
+        print(f"  stderr ({len(stderr)} chars): {stderr[:500]}")
+        return False, errors
+
+    # Total mallocs > Total frees (guaranteed by _exit(0) skipping cleanup)
+    m_mallocs = re.search(r"Total mallocs:\s+(\d+)", stdout)
+    m_frees = re.search(r"Total frees:\s+(\d+)", stdout)
+    if m_mallocs and m_frees:
+        mallocs = int(m_mallocs.group(1))
+        frees = int(m_frees.group(1))
+        if mallocs > frees:
+            print(f"  PASS  Total mallocs ({mallocs}) > Total frees ({frees})")
+        else:
+            errors.append(f"Expected mallocs ({mallocs}) > frees ({frees}) due to _exit(0)")
+            print(f"  FAIL  Expected mallocs ({mallocs}) > frees ({frees}) due to _exit(0)")
+    elif m_mallocs:
+        print(f"  INFO  Total mallocs: {m_mallocs.group(1)} (frees line not found)")
+    else:
+        errors.append("Total mallocs line not found")
+        print(f"  FAIL  Total mallocs line not found")
+
+    # Outstanding allocations > 0 (guaranteed by _exit(0))
+    m_outstanding = re.search(r"Outstanding allocs:\s+(\d+)", stdout)
+    if m_outstanding:
+        outstanding = int(m_outstanding.group(1))
+        if outstanding > 0:
+            print(f"  PASS  Outstanding allocs: {outstanding} (expected > 0)")
+        else:
+            errors.append(f"Outstanding allocs is {outstanding}, expected > 0")
+            print(f"  FAIL  Outstanding allocs is {outstanding}, expected > 0")
+    else:
+        print(f"  INFO  Outstanding allocs line not found")
+
+    # Outstanding bytes > 0
+    m_outstanding_bytes = re.search(r"Outstanding bytes:\s*(.+)", stdout)
+    if m_outstanding_bytes:
+        val = m_outstanding_bytes.group(1).strip()
+        if is_zero_size(val):
+            errors.append("Outstanding bytes is 0, expected > 0")
+            print(f"  FAIL  Outstanding bytes is 0, expected > 0")
+        else:
+            print(f"  PASS  Outstanding bytes: {val}")
+    else:
+        print(f"  INFO  Outstanding bytes line not found")
+
+    # Size distribution section present when outstanding > 0
+    if m_outstanding and int(m_outstanding.group(1)) > 0:
+        if "Size distribution:" in stdout:
+            print(f"  PASS  Size distribution section present")
+        else:
+            print(f"  INFO  Size distribution section not found")
+
+    ok = len(errors) == 0
+    if ok:
+        print(f"  PASS  box64_memleak.py memleak_leaker (all assertions passed)")
+    else:
+        if stderr.strip():
+            print(f"  DEBUG stderr ({len(stderr)} chars):")
+            for line in stderr.strip().splitlines()[:30]:
+                print(f"         {line}")
     return ok, errors
 
 
@@ -446,6 +645,61 @@ def check_steam(box64_bin, test_bins):
     else:
         errors.append("Per-PID Memory Breakdown section not found")
         print(f"  FAIL  Per-PID Memory Breakdown section not found")
+
+    # FreeBox64Context <= NewBox64Context
+    m_new_ctx = re.search(r"NewBox64Context:\s+(\d+)", stdout)
+    m_free_ctx = re.search(r"FreeBox64Context:\s+(\d+)", stdout)
+    if m_new_ctx and m_free_ctx:
+        new_ctx = int(m_new_ctx.group(1))
+        free_ctx = int(m_free_ctx.group(1))
+        if free_ctx <= new_ctx:
+            print(f"  PASS  FreeBox64Context ({free_ctx}) <= NewBox64Context ({new_ctx})")
+        else:
+            errors.append(f"FreeBox64Context ({free_ctx}) > NewBox64Context ({new_ctx})")
+            print(f"  FAIL  FreeBox64Context ({free_ctx}) > NewBox64Context ({new_ctx})")
+        # FreeBox64Context > 0 (children get cleaned up)
+        if free_ctx > 0:
+            print(f"  PASS  FreeBox64Context > 0 (children cleaned up)")
+        else:
+            errors.append("FreeBox64Context is 0, expected > 0")
+            print(f"  FAIL  FreeBox64Context is 0, expected > 0")
+    elif m_free_ctx:
+        print(f"  INFO  FreeBox64Context: {m_free_ctx.group(1)}")
+    else:
+        print(f"  INFO  FreeBox64Context line not found")
+
+    # DynaRec bytes allocated in sane range [1 KB, 1 GB]
+    m_dynarec_bytes = re.search(r"DynaRec JIT.*?Bytes allocated:\s*(.+)", stdout)
+    if not m_dynarec_bytes:
+        m_dynarec_bytes = re.search(r"Bytes allocated:\s*(.+)", stdout)
+    if m_dynarec_bytes:
+        val = m_dynarec_bytes.group(1).strip()
+        alloc_bytes = parse_fmt_size(val)
+        if 1024 <= alloc_bytes <= 1024**3:
+            print(f"  PASS  DynaRec bytes in sane range: {val} ({alloc_bytes} bytes)")
+        elif alloc_bytes > 0:
+            print(f"  INFO  DynaRec bytes: {val} ({alloc_bytes} bytes, outside expected range)")
+        else:
+            print(f"  INFO  DynaRec bytes: {val}")
+
+    # Thread Summary consistency (if present)
+    m_threads_created = re.search(r"Threads created:\s+(\d+)", stdout)
+    m_threads_destroyed = re.search(r"Threads destroyed:\s+(\d+)", stdout)
+    m_threads_peak = re.search(r"Peak threads:\s+(\d+)", stdout)
+    if m_threads_created and m_threads_destroyed:
+        created = int(m_threads_created.group(1))
+        destroyed = int(m_threads_destroyed.group(1))
+        if created >= destroyed:
+            print(f"  PASS  Threads created ({created}) >= destroyed ({destroyed})")
+        else:
+            errors.append(f"Threads created ({created}) < destroyed ({destroyed})")
+            print(f"  FAIL  Threads created ({created}) < destroyed ({destroyed})")
+    if m_threads_peak:
+        peak = int(m_threads_peak.group(1))
+        if peak >= 1:
+            print(f"  PASS  Peak threads: {peak} (>= 1)")
+        else:
+            print(f"  INFO  Peak threads: {peak}")
 
     # Informational checks (no fail)
     if "Memory Growth Timeline" in stdout:
@@ -722,6 +976,21 @@ def main():
             errors.extend(errs)
     else:
         print("\n  SKIP  Output correctness: no testNN binaries found")
+
+    # Memleak leaker test (dedicated binary)
+    memleak_bin = next(
+        (tb for tb in test_bins if 'memleak_leaker' in os.path.basename(tb)),
+        None,
+    )
+    if memleak_bin:
+        ok, errs = check_memleak_leaker(args.box64, memleak_bin)
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+            errors.extend(errs)
+    else:
+        print("\n  SKIP  box64_memleak.py (memleak_leaker): binary not found")
 
     # Steam tests use specific binaries
     steam_bin = next(

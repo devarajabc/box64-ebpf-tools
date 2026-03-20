@@ -3,6 +3,7 @@ name: E2E eBPF Integration (ARM64)
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -22,7 +23,8 @@ jobs:
         run: |
           x86_64-linux-gnu-gcc -O1 -o /tmp/dynarec_stress tests/dynarec_stress.c
           x86_64-linux-gnu-gcc -O1 -lpthread -o /tmp/steam_lifecycle tests/steam_lifecycle.c
-          file /tmp/dynarec_stress /tmp/steam_lifecycle
+          x86_64-linux-gnu-gcc -O1 -ldl -o /tmp/memleak_leaker tests/memleak_leaker.c
+          file /tmp/dynarec_stress /tmp/steam_lifecycle /tmp/memleak_leaker
 
       - name: Clone Box64 source
         run: git clone --depth=1 https://github.com/ptitSeb/box64.git /tmp/box64-src
@@ -49,6 +51,6 @@ jobs:
         run: |
           sudo python3 tests/test_ebpf_integration.py \
             --box64 /tmp/box64-build/box64 \
-            --test-bin /tmp/dynarec_stress /tmp/steam_lifecycle \
+            --test-bin /tmp/dynarec_stress /tmp/steam_lifecycle /tmp/memleak_leaker \
             --test-dir /tmp/box64-src/tests
         timeout-minutes: 15
