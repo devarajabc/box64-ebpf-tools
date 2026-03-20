@@ -11,8 +11,12 @@ import box64_memleak
 import box64_steam
 
 
-class _CflagsCapture(Exception):
-    """Raised by mock BPF to stop main() after capturing cflags."""
+class _CflagsCapture(BaseException):
+    """Raised by mock BPF to stop main() after capturing cflags.
+
+    Inherits from BaseException (not Exception) so that production
+    try/except Exception blocks don't accidentally catch it.
+    """
     pass
 
 

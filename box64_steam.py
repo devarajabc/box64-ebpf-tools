@@ -1610,8 +1610,10 @@ int trace_cow_fault(struct pt_regs *ctx) {
 
 // BCC helpers.h only forward-declares bpf_perf_event_data; provide the
 // definition so we can access ctx->regs on all architectures.
+// Use struct pt_regs (from ptrace.h) since bpf_user_pt_regs_t may not
+// be available in all BCC versions.
 struct bpf_perf_event_data {
-    bpf_user_pt_regs_t regs;
+    struct pt_regs regs;
     __u64 sample_period;
     __u64 addr;
 };
@@ -1809,7 +1811,17 @@ def main():
         bpf_src = _rewrite_atomic_increment(bpf_src)
 
     print(f"[*] Compiling and attaching uprobes to {binary} ...")
-    b = BPF(text=bpf_src, cflags=cflags)
+    try:
+        b = BPF(text=bpf_src, cflags=cflags)
+    except Exception as e:
+        if track_profile:
+            print(f"WARNING: BPF compilation failed with TRACK_PROFILE enabled: {e}")
+            print("WARNING: Retrying without PC sampling (BCC version incompatibility)")
+            cflags = [f for f in cflags if f not in ("-DTRACK_PROFILE", f"-DPROFILE_CAPACITY={hash_cap}")]
+            track_profile = False
+            b = BPF(text=bpf_src, cflags=cflags)
+        else:
+            raise
 
     probe_count = 0
 
@@ -1934,6 +1946,9 @@ def main():
             sys.exit(1)
         target_desc = f"PID {args.pid}" if getattr(args, "pid", None) else "all PIDs"
         print(f"[*] PC sampling attached at {args.sample_freq} Hz for {target_desc}")
+
+    if args.sample_freq > 0 and not track_profile:
+        print("WARNING: PC sampling unavailable (BCC compilation failed)")
 
     pid_str = f" (PID {args.pid})" if args.pid else " (all PIDs)"
     features = []

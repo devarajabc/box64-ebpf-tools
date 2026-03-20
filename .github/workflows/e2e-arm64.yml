@@ -24,15 +24,19 @@ jobs:
           x86_64-linux-gnu-gcc -O1 -lpthread -o /tmp/steam_lifecycle tests/steam_lifecycle.c
           file /tmp/dynarec_stress /tmp/steam_lifecycle
 
+      - name: Clone Box64 source
+        run: git clone --depth=1 https://github.com/ptitSeb/box64.git /tmp/box64-src
+
+      - name: Get Box64 commit hash
+        id: box64-hash
+        run: echo "hash=$(git -C /tmp/box64-src rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Cache Box64 build
         id: cache-box64
         uses: actions/cache@v4
         with:
           path: /tmp/box64-build
-          key: box64-arm64-${{ hashFiles('.github/workflows/e2e-arm64.yml') }}
-
-      - name: Clone Box64 source
-        run: git clone --depth=1 https://github.com/ptitSeb/box64.git /tmp/box64-src
+          key: box64-arm64-${{ steps.box64-hash.outputs.hash }}
 
       - name: Build Box64
         if: steps.cache-box64.outputs.cache-hit != 'true'

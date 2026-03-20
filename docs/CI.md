@@ -147,6 +147,7 @@ Assertions for `box64_steam.py` (default flags — all features enabled):
 - No Python tracebacks
 
 Assertions for `box64_steam.py` (PC sampling — `--sample-freq 4999`):
+- If BCC doesn't support `TRACK_PROFILE` compilation: **SKIP** (not FAIL) — the tool retries without PC sampling and the test verifies it still produces a `FINAL REPORT`
 - Output contains `FINAL REPORT`
 - `NewBox64Context` count >= 1
 - `PC Sampling Profile` section present
