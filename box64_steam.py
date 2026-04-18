@@ -293,13 +293,12 @@ def _clear_stale_uprobes(binary):
 
 
 def _patch_bcc_uretprobe():
-    """Work around an aarch64 BCC bug where lib.bpf_attach_uprobe is defined
-    with only 6 arguments (missing the ref_ctr_offset parameter).
+    """Fix BCC 0.29.1 aarch64 bug: lib.bpf_attach_uprobe missing 7th arg.
 
     On aarch64, the missing ref_ctr_offset parameter picks up garbage from
     register x6, corrupting perf_event_attr.config and causing EINVAL when
     a uprobe and uretprobe target the same symbol. This monkey-patches the
-    ctypes binding to always pass ref_ctr_offset=0 for such 6-arg bindings.
+    ctypes binding to always pass ref_ctr_offset=0.
     """
     import platform
     if platform.machine() != "aarch64":
@@ -1810,18 +1809,40 @@ def main():
         print("[*] Old BCC detected: rewriting atomic_increment calls")
         bpf_src = _rewrite_atomic_increment(bpf_src)
 
+    # Markers in BPF compile error text that indicate a genuine
+    # TRACK_PROFILE / BCC incompatibility. Only these trigger the PC
+    # sampling fallback; unrelated BCC/kernel failures (missing
+    # headers, kernel version mismatch, perf_event_paranoid, etc.)
+    # are re-raised with their original context intact.
+    profile_error_markers = (
+        "bpf_perf_event_data",
+        "on_perf_sample",
+        "pc_samples",
+        "TRACK_PROFILE",
+        "PROFILE_CAPACITY",
+    )
+
     print(f"[*] Compiling and attaching uprobes to {binary} ...")
     try:
         b = BPF(text=bpf_src, cflags=cflags)
     except Exception as e:
-        if track_profile:
-            print(f"WARNING: BPF compilation failed with TRACK_PROFILE enabled: {e}")
-            print("WARNING: Retrying without PC sampling (BCC version incompatibility)")
-            cflags = [f for f in cflags if f not in ("-DTRACK_PROFILE", f"-DPROFILE_CAPACITY={hash_cap}")]
-            track_profile = False
-            b = BPF(text=bpf_src, cflags=cflags)
-        else:
+        err_text = str(e)
+        looks_like_profile_error = track_profile and any(
+            marker in err_text for marker in profile_error_markers
+        )
+        if not looks_like_profile_error:
             raise
+        print(f"WARNING: BPF compilation failed with TRACK_PROFILE enabled: {e}")
+        print("WARNING: Retrying without PC sampling (BCC version incompatibility)")
+        cflags = [f for f in cflags if f not in ("-DTRACK_PROFILE", f"-DPROFILE_CAPACITY={hash_cap}")]
+        track_profile = False
+        try:
+            b = BPF(text=bpf_src, cflags=cflags)
+        except Exception as retry_err:
+            raise RuntimeError(
+                f"BPF compilation failed even after disabling TRACK_PROFILE. "
+                f"Original error: {e}"
+            ) from retry_err
 
     probe_count = 0
 
