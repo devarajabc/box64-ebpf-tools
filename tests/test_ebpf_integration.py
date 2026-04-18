@@ -405,11 +405,14 @@ def check_memleak(box64_bin, test_bins):
     else:
         print(f"  INFO  Outstanding bytes line not found")
 
-    # No negative numeric values in the report (sanity check)
+    # No negative numeric values in the report (sanity check).
+    # Lookbehind excludes letters, digits, and underscores so version
+    # suffixes ("libc-2.31.so", "box64-0.3.1") and ISO timestamps
+    # ("2026-04-18") don't match as negative numbers.
     final_idx = stdout.find("FINAL REPORT")
     if final_idx >= 0:
         report = stdout[final_idx:]
-        neg_matches = re.findall(r'(?<![a-zA-Z_])-\d+', report)
+        neg_matches = re.findall(r'(?<![a-zA-Z_0-9])-\d+', report)
         if neg_matches:
             errors.append(f"Negative values found in report: {neg_matches[:5]}")
             print(f"  FAIL  Negative values in report: {neg_matches[:5]}")
