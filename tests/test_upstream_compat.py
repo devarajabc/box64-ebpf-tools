@@ -273,12 +273,14 @@ EXPECTED_OFFSETS = {
     "x64_addr": 0x20,
     "x64_size": 0x28,
     "native_size": 0x30,
-    "hash": 0x40,
-    "done": 0x44,
-    "gone": 0x45,
-    "dirty": 0x46,
-    "__bitfield__": 0x47,
-    "isize": 0x4C,
+    # x64_readaddr (uintptr_t, 8B) was inserted at 0x38 upstream, shifting
+    # every field from `hash` onward by +0x8.
+    "hash": 0x48,
+    "done": 0x4C,
+    "gone": 0x4D,
+    "dirty": 0x4E,
+    "__bitfield__": 0x4F,
+    "isize": 0x54,
 }
 
 

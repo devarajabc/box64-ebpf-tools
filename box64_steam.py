@@ -67,27 +67,6 @@ def format_log2_hist(hist_map, val_type="value"):
     return "\n".join(lines)
 
 
-def check_binary(path):
-    """Verify binary exists and is readable."""
-    if not os.path.isfile(path):
-        print(f"ERROR: binary not found: {path}")
-        sys.exit(1)
-    if not os.access(path, os.R_OK):
-        print(f"ERROR: cannot read binary: {path}")
-        sys.exit(1)
-
-
-def _read_symbols(path):
-    """Read all symbols from binary using nm (local + dynamic)."""
-    out = ""
-    for nm_args in [["nm", path], ["nm", "-D", path]]:
-        try:
-            out += subprocess.check_output(nm_args, stderr=subprocess.DEVNULL, text=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            pass
-    return out
-
-
 def check_symbols(path, symbols):
     """Verify that required symbols are present in the binary."""
     out = _read_symbols(path)
@@ -101,24 +80,16 @@ def check_symbols(path, symbols):
         sys.exit(1)
 
 
-def check_symbols_soft(path, symbols):
-    """Check if symbols are present; return list of missing ones (non-fatal)."""
-    out = _read_symbols(path)
-    if not out:
-        return []  # can't verify, assume present
-    return [s for s in symbols if s not in out]
-
-
 def _read_block_from_fd(f, actual_block_addr):
     """Read dynablock_t metadata using an already-open /proc/PID/mem fd.
 
-    dynablock_t layout (key offsets):
+    dynablock_t layout (key offsets, post x64_readaddr insertion at 0x38):
       0x00: block (void*)        - pointer to native code start
       0x08: actual_block (void*) - the allocation base
       0x20: x64_addr (uintptr_t) - original x86_64 address
       0x28: x64_size (int)       - x86_64 code size
       0x30: native_size (int)    - JIT native code size
-      0x4c: isize (int)          - instruction count
+      0x54: isize (int)          - instruction count
     """
     try:
         f.seek(actual_block_addr)
@@ -129,14 +100,14 @@ def _read_block_from_fd(f, actual_block_addr):
         if db_ptr == 0:
             return None
         f.seek(db_ptr)
-        data = f.read(0x50)
-        if len(data) < 0x50:
+        data = f.read(0x58)
+        if len(data) < 0x58:
             return None
         block = struct.unpack_from("<Q", data, 0x00)[0]
         x64_addr = struct.unpack_from("<Q", data, 0x20)[0]
         x64_size = struct.unpack_from("<Q", data, 0x28)[0]
         native_size = struct.unpack_from("<Q", data, 0x30)[0]
-        isize = struct.unpack_from("<i", data, 0x4c)[0]
+        isize = struct.unpack_from("<i", data, 0x54)[0]
         return {
             "block": block,
             "x64_addr": x64_addr,
@@ -146,33 +117,6 @@ def _read_block_from_fd(f, actual_block_addr):
         }
     except (OSError, struct.error):
         return None
-
-
-def read_smaps_rollup(pid):
-    """Read /proc/PID/smaps_rollup for CoW-relevant memory stats."""
-    result = {}
-    try:
-        with open(f"/proc/{pid}/smaps_rollup") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 2:
-                    key = parts[0].rstrip(":")
-                    if key in ("Rss", "Private_Dirty", "Private_Clean",
-                               "Shared_Dirty", "Shared_Clean", "Pss"):
-                        result[key] = int(parts[1]) * 1024  # kB -> bytes
-    except (OSError, ValueError):
-        pass
-    return result
-
-
-def read_minflt(pid):
-    """Read minor page fault count from /proc/PID/stat (field 10)."""
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            fields = f.read().split()
-            return int(fields[9])
-    except (OSError, ValueError, IndexError):
-        return 0
 
 
 def read_proc_cmdline(pid):
@@ -213,22 +157,22 @@ def read_block_metadata(pid, alloc_addr):
             db_ptr = struct.unpack("Q", f.read(8))[0]
             if db_ptr == 0:
                 return None
-            # Read a contiguous chunk from offset 0x18 to 0x50 (56 bytes)
+            # Read a contiguous chunk from offset 0x18 to 0x58 (64 bytes)
             # to minimize seeks
             f.seek(db_ptr + 0x18)
-            data = f.read(0x50 - 0x18)  # 56 bytes
-            if len(data) < 0x50 - 0x18:
+            data = f.read(0x58 - 0x18)  # 64 bytes
+            if len(data) < 0x58 - 0x18:
                 return None
             in_used = struct.unpack_from("I", data, 0x00)[0]        # 0x18
             tick = struct.unpack_from("I", data, 0x04)[0]           # 0x1c
             x64_addr = struct.unpack_from("Q", data, 0x08)[0]      # 0x20
             x64_size = struct.unpack_from("Q", data, 0x10)[0]      # 0x28
             native_size = struct.unpack_from("Q", data, 0x18)[0]   # 0x30
-            # 0x38: prefixsize (skip), 0x3c: size
-            total_size = struct.unpack_from("i", data, 0x24)[0]    # 0x3c
-            hash_val = struct.unpack_from("I", data, 0x28)[0]      # 0x40
-            done, gone, dirty, flags_byte = struct.unpack_from("BBBB", data, 0x2c)  # 0x44-0x47
-            isize = struct.unpack_from("i", data, 0x34)[0]         # 0x4c
+            # 0x38: x64_readaddr (skip), 0x40: prefixsize (skip), 0x44: size
+            total_size = struct.unpack_from("i", data, 0x2c)[0]    # 0x44
+            hash_val = struct.unpack_from("I", data, 0x30)[0]      # 0x48
+            done, gone, dirty, flags_byte = struct.unpack_from("BBBB", data, 0x34)  # 0x4c-0x4f
+            isize = struct.unpack_from("i", data, 0x3c)[0]         # 0x54
             return {
                 "tick": tick, "in_used": in_used,
                 "x64_addr": x64_addr, "x64_size": x64_size,
@@ -1062,9 +1006,9 @@ int jit_free_entry(struct pt_regs *ctx) {
 //   0x20: x64_addr (void*)
 //   0x28: x64_size (u64)
 //   0x30: native_size (u64)
-//   0x40: hash (u32)
-//   0x44: done (u8), 0x45: gone (u8), 0x46: dirty (u8), 0x47: always_test (u8 bitfield)
-//   0x4c: isize (i32)
+//   0x48: hash (u32)
+//   0x4c: done (u8), 0x4d: gone (u8), 0x4e: dirty (u8), 0x4f: always_test (u8 bitfield)
+//   0x54: isize (i32)
 int freedynablock_entry(struct pt_regs *ctx) {
 #ifdef FILTER_PID
     if (get_pid() != FILTER_PID) return 0;
@@ -1080,13 +1024,13 @@ int freedynablock_entry(struct pt_regs *ctx) {
     bpf_probe_read_user(&evt.x64_addr, sizeof(evt.x64_addr), (void*)(db_ptr + 0x20));
     bpf_probe_read_user(&evt.x64_size, sizeof(evt.x64_size), (void*)(db_ptr + 0x28));
     bpf_probe_read_user(&evt.native_size, sizeof(evt.native_size), (void*)(db_ptr + 0x30));
-    bpf_probe_read_user(&evt.hash, sizeof(evt.hash), (void*)(db_ptr + 0x40));
-    bpf_probe_read_user(&evt.dirty, sizeof(evt.dirty), (void*)(db_ptr + 0x46));
+    bpf_probe_read_user(&evt.hash, sizeof(evt.hash), (void*)(db_ptr + 0x48));
+    bpf_probe_read_user(&evt.dirty, sizeof(evt.dirty), (void*)(db_ptr + 0x4e));
     u8 flags_byte = 0;
-    bpf_probe_read_user(&flags_byte, sizeof(flags_byte), (void*)(db_ptr + 0x47));
+    bpf_probe_read_user(&flags_byte, sizeof(flags_byte), (void*)(db_ptr + 0x4f));
     evt.always_test = flags_byte & 0x3;
-    bpf_probe_read_user(&evt.gone, sizeof(evt.gone), (void*)(db_ptr + 0x45));
-    bpf_probe_read_user(&evt.isize, sizeof(evt.isize), (void*)(db_ptr + 0x4c));
+    bpf_probe_read_user(&evt.gone, sizeof(evt.gone), (void*)(db_ptr + 0x4d));
+    bpf_probe_read_user(&evt.isize, sizeof(evt.isize), (void*)(db_ptr + 0x54));
 
     // Read actual_block to look up our jit_blocks map
     u64 actual_block = 0;
@@ -1129,8 +1073,8 @@ int invaliddynablock_entry(struct pt_regs *ctx) {
     evt.pid = get_pid();
     bpf_probe_read_user(&evt.x64_addr, sizeof(evt.x64_addr), (void*)(db_ptr + 0x20));
     bpf_probe_read_user(&evt.x64_size, sizeof(evt.x64_size), (void*)(db_ptr + 0x28));
-    bpf_probe_read_user(&evt.hash, sizeof(evt.hash), (void*)(db_ptr + 0x40));
-    bpf_probe_read_user(&evt.isize, sizeof(evt.isize), (void*)(db_ptr + 0x4c));
+    bpf_probe_read_user(&evt.hash, sizeof(evt.hash), (void*)(db_ptr + 0x48));
+    bpf_probe_read_user(&evt.isize, sizeof(evt.isize), (void*)(db_ptr + 0x54));
     bpf_probe_read_user(&evt.tick, sizeof(evt.tick), (void*)(db_ptr + 0x1c));
 
     invalidation_events.perf_submit(ctx, &evt, sizeof(evt));
@@ -1566,6 +1510,11 @@ from box64_common import (
     rank_items,
     fmt_size,
     fmt_ns,
+    check_binary,
+    _read_symbols,
+    check_symbols_soft,
+    read_smaps_rollup,
+    read_minflt,
     _clear_stale_uprobes,
     _patch_bcc_uretprobe,
     _bcc_has_atomic_increment,

@@ -8,21 +8,21 @@ import box64_steam
 
 def _build_dynablock(block=0x1000, x64_addr=0x400000, x64_size=128,
                      native_size=256, isize=42):
-    """Build a fake dynablock_t struct (0x50 bytes).
+    """Build a fake dynablock_t struct (0x58 bytes).
 
-    Layout:
+    Layout (post x64_readaddr insertion at 0x38, shifting +0x8):
       0x00: block (void*)
       0x20: x64_addr (uintptr_t)
       0x28: x64_size (uint64)
       0x30: native_size (uint64)
-      0x4c: isize (int32)
+      0x54: isize (int32)
     """
-    data = bytearray(0x50)
+    data = bytearray(0x58)
     struct.pack_into("<Q", data, 0x00, block)
     struct.pack_into("<Q", data, 0x20, x64_addr)
     struct.pack_into("<Q", data, 0x28, x64_size)
     struct.pack_into("<Q", data, 0x30, native_size)
-    struct.pack_into("<i", data, 0x4c, isize)
+    struct.pack_into("<i", data, 0x54, isize)
     return bytes(data)
 
 
@@ -76,7 +76,7 @@ class TestReadBlockFromFd:
         # Pointer is valid but struct data is too short
         alloc_addr = 0
         db_ptr = 0x100
-        buf = bytearray(db_ptr + 0x10)  # only 0x10 bytes of struct (need 0x50)
+        buf = bytearray(db_ptr + 0x10)  # only 0x10 bytes of struct (need 0x58)
         struct.pack_into("<Q", buf, alloc_addr, db_ptr)
         f = io.BytesIO(bytes(buf))
         result = box64_steam._read_block_from_fd(f, alloc_addr)

@@ -33,27 +33,6 @@ except ImportError:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def check_binary(path):
-    """Verify binary exists and is readable."""
-    if not os.path.isfile(path):
-        print(f"ERROR: binary not found: {path}")
-        sys.exit(1)
-    if not os.access(path, os.R_OK):
-        print(f"ERROR: cannot read binary: {path}")
-        sys.exit(1)
-
-
-def _read_symbols(path):
-    """Read all symbols from binary using nm (local + dynamic)."""
-    out = ""
-    for nm_args in [["nm", path], ["nm", "-D", path]]:
-        try:
-            out += subprocess.check_output(nm_args, stderr=subprocess.DEVNULL, text=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            pass
-    return out
-
-
 def check_symbols(path, symbols):
     out = _read_symbols(path)
     if not out:
@@ -63,14 +42,6 @@ def check_symbols(path, symbols):
     if missing:
         return False
     return True
-
-
-def check_symbols_soft(path, symbols):
-    """Check if symbols are present; return list of missing ones (non-fatal)."""
-    out = _read_symbols(path)
-    if not out:
-        return []
-    return [s for s in symbols if s not in out]
 
 
 def check_dynarec_symbols(path):
@@ -86,33 +57,6 @@ def check_dynarec_symbols(path):
         print("Box64 was likely built without DynaRec support.")
         print("Rebuild with a DynaRec option, e.g.: cmake .. -DARM_DYNAREC=ON")
         sys.exit(1)
-
-
-def read_smaps_rollup(pid):
-    """Read /proc/PID/smaps_rollup for CoW-relevant memory stats."""
-    result = {}
-    try:
-        with open(f"/proc/{pid}/smaps_rollup") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 2:
-                    key = parts[0].rstrip(":")
-                    if key in ("Rss", "Private_Dirty", "Private_Clean",
-                               "Shared_Dirty", "Shared_Clean", "Pss"):
-                        result[key] = int(parts[1]) * 1024  # kB -> bytes
-    except (OSError, ValueError):
-        pass
-    return result
-
-
-def read_minflt(pid):
-    """Read minor page fault count from /proc/PID/stat (field 10)."""
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            fields = f.read().split()
-            return int(fields[9])
-    except (OSError, ValueError, IndexError):
-        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -636,6 +580,11 @@ from box64_common import (
     rank_items,
     fmt_size,
     fmt_ns,
+    check_binary,
+    _read_symbols,
+    check_symbols_soft,
+    read_smaps_rollup,
+    read_minflt,
     _clear_stale_uprobes,
     _patch_bcc_uretprobe,
     _bcc_has_atomic_increment,

@@ -1,15 +1,19 @@
 """Shared helpers for box64 eBPF tools.
 
 Pure-computation helpers (correlate_thread_parents, compute_cow_deltas,
-rank_items) and formatters (fmt_size, fmt_ns) have no external dependencies.
-BPF/BCC integration helpers (_clear_stale_uprobes, _patch_bcc_uretprobe,
+rank_items), formatters (fmt_size, fmt_ns), binary/symbol validation
+(check_binary, _read_symbols, check_symbols_soft), and /proc parsers
+(read_smaps_rollup, read_minflt) have no external deps. BPF/BCC
+integration helpers (_clear_stale_uprobes, _patch_bcc_uretprobe,
 _bcc_has_atomic_increment, _rewrite_atomic_increment) lazy-import
 bcc/ctypes/platform inside their bodies so this module can still be
-imported on systems without BCC — the tool scripts handle the missing-BCC
-case at their own module load with a friendly error.
+imported on systems without BCC — the tool scripts handle the
+missing-BCC case at their own module load with a friendly error.
 """
 import os
 import re
+import subprocess
+import sys
 
 try:
     from bcc import BPF
@@ -96,6 +100,70 @@ def fmt_ns(ns):
         return f"{ns/1_000_000:.1f}ms"
     else:
         return f"{ns/1_000_000_000:.2f}s"
+
+
+# ---------------------------------------------------------------------------
+# Binary / symbol validation
+# ---------------------------------------------------------------------------
+
+def check_binary(path):
+    """Verify binary exists and is readable."""
+    if not os.path.isfile(path):
+        print(f"ERROR: binary not found: {path}")
+        sys.exit(1)
+    if not os.access(path, os.R_OK):
+        print(f"ERROR: cannot read binary: {path}")
+        sys.exit(1)
+
+
+def _read_symbols(path):
+    """Read all symbols from binary using nm (local + dynamic)."""
+    out = ""
+    for nm_args in [["nm", path], ["nm", "-D", path]]:
+        try:
+            out += subprocess.check_output(nm_args, stderr=subprocess.DEVNULL, text=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+    return out
+
+
+def check_symbols_soft(path, symbols):
+    """Check if symbols are present; return list of missing ones (non-fatal)."""
+    out = _read_symbols(path)
+    if not out:
+        return []  # can't verify, assume present
+    return [s for s in symbols if s not in out]
+
+
+# ---------------------------------------------------------------------------
+# /proc parsing
+# ---------------------------------------------------------------------------
+
+def read_smaps_rollup(pid):
+    """Read /proc/PID/smaps_rollup for CoW-relevant memory stats."""
+    result = {}
+    try:
+        with open(f"/proc/{pid}/smaps_rollup") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    key = parts[0].rstrip(":")
+                    if key in ("Rss", "Private_Dirty", "Private_Clean",
+                               "Shared_Dirty", "Shared_Clean", "Pss"):
+                        result[key] = int(parts[1]) * 1024  # kB -> bytes
+    except (OSError, ValueError):
+        pass
+    return result
+
+
+def read_minflt(pid):
+    """Read minor page fault count from /proc/PID/stat (field 10)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            fields = f.read().split()
+            return int(fields[9])
+    except (OSError, ValueError, IndexError):
+        return 0
 
 
 # ---------------------------------------------------------------------------

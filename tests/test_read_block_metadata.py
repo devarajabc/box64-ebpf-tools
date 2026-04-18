@@ -26,17 +26,21 @@ def _build_proc_mem(db_ptr, db_data, alloc_addr=0x1000):
 def _build_dynablock_data(in_used=1, tick=42, x64_addr=0xDEAD, x64_size=128,
                           native_size=256, total_size=512, hash_val=0xABCD,
                           done=1, gone=0, dirty=0, flags_byte=0, isize=64):
-    """Build 56 bytes of dynablock_t data starting at offset 0x18."""
-    data = bytearray(0x50 - 0x18)  # 56 bytes
+    """Build 64 bytes of dynablock_t data starting at offset 0x18.
+
+    Post x64_readaddr insertion: everything from size/hash onward is at +0x8.
+    """
+    data = bytearray(0x58 - 0x18)  # 64 bytes
     struct.pack_into("I", data, 0x00, in_used)      # 0x18
     struct.pack_into("I", data, 0x04, tick)          # 0x1c
     struct.pack_into("Q", data, 0x08, x64_addr)     # 0x20
     struct.pack_into("Q", data, 0x10, x64_size)     # 0x28
     struct.pack_into("Q", data, 0x18, native_size)  # 0x30
-    struct.pack_into("i", data, 0x24, total_size)   # 0x3c
-    struct.pack_into("I", data, 0x28, hash_val)     # 0x40
-    struct.pack_into("BBBB", data, 0x2c, done, gone, dirty, flags_byte)
-    struct.pack_into("i", data, 0x34, isize)        # 0x4c
+    # 0x38: x64_readaddr (skip), 0x40: prefixsize (skip), 0x44: size
+    struct.pack_into("i", data, 0x2c, total_size)   # 0x44
+    struct.pack_into("I", data, 0x30, hash_val)     # 0x48
+    struct.pack_into("BBBB", data, 0x34, done, gone, dirty, flags_byte)  # 0x4c-0x4f
+    struct.pack_into("i", data, 0x3c, isize)        # 0x54
     return bytes(data)
 
 
@@ -83,7 +87,7 @@ class TestReadBlockMetadata:
         alloc_addr = 0x100
         db_ptr = 0x200
         # Only write the pointer, no dynablock_t data
-        buf = bytearray(db_ptr + 0x18 + 10)  # not enough for 56 bytes
+        buf = bytearray(db_ptr + 0x18 + 10)  # not enough for 64 bytes
         struct.pack_into("Q", buf, alloc_addr, db_ptr)
 
         monkeypatch.setattr("builtins.open",

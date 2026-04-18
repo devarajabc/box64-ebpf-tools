@@ -5,6 +5,7 @@ import subprocess
 
 import pytest
 
+import box64_common
 import box64_dynarec
 import box64_memleak
 import box64_steam
@@ -153,8 +154,7 @@ class TestCheckSymbolsExitOnMissing:
 # check_symbols_soft()
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("module", MODULES,
-                         ids=["dynarec", "memleak", "steam"])
+@pytest.mark.parametrize("module", [box64_common], ids=["common"])
 class TestCheckSymbolsSoft:
     def test_all_present(self, module, monkeypatch):
         monkeypatch.setattr(module, "_read_symbols",
