@@ -40,12 +40,14 @@ def compute_cow_deltas(parent_smaps, parent_minflt, child_smaps, child_minflt):
     """Compute CoW deltas between parent and child snapshots.
 
     Returns: (delta_dirty_bytes, delta_minflt)
-    delta_dirty_bytes is clamped to >= 0 (negative Private_Dirty delta
-    is not a CoW event).
+    Both values are clamped to >= 0. A negative Private_Dirty or
+    minflt delta does not represent a CoW event — it can only arise
+    from out-of-order sampling or a child snapshot that predates the
+    parent baseline, in which case zero is the correct display value.
     """
     delta_dirty = child_smaps.get("Private_Dirty", 0) - parent_smaps.get("Private_Dirty", 0)
     delta_minflt = child_minflt - parent_minflt
-    return (max(0, delta_dirty), delta_minflt)
+    return (max(0, delta_dirty), max(0, delta_minflt))
 
 
 def rank_items(items, top_n=20, sort_key_idx=0):

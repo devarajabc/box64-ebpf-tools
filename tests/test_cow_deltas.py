@@ -33,3 +33,13 @@ class TestComputeCowDeltas:
         child = {"Private_Dirty": 4096}
         delta_dirty, delta_minflt = compute_cow_deltas(parent, 0, child, 0)
         assert delta_dirty == 0  # clamped, not -4096
+
+    def test_negative_minflt_clamped_to_zero(self):
+        # Child observed fewer minor faults than parent baseline
+        # (possible under sample ordering / fork races); delta must
+        # not surface as a negative number in tool output.
+        delta_dirty, delta_minflt = compute_cow_deltas(
+            {"Private_Dirty": 4096}, 200,
+            {"Private_Dirty": 4096}, 150)
+        assert delta_dirty == 0
+        assert delta_minflt == 0  # clamped, not -50
