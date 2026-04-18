@@ -115,8 +115,5 @@ class TestReadProcCmdline:
             result = box64_steam.read_proc_cmdline(1234)
         assert result == "pid1234"
 
-    def test_memleak_has_no_read_proc_cmdline(self):
-        assert not hasattr(box64_memleak, "read_proc_cmdline")
-
     def test_dynarec_has_no_read_proc_cmdline(self):
         assert not hasattr(box64_dynarec, "read_proc_cmdline")

@@ -66,7 +66,3 @@ class TestFmtNs:
 
     def test_boundary_ms_to_s(self, module):
         assert module.fmt_ns(1_000_000_000) == "1.00s"
-
-
-def test_memleak_has_no_fmt_ns():
-    assert not hasattr(box64_memleak, "fmt_ns")

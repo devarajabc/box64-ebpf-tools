@@ -105,8 +105,3 @@ class TestSteamFormatLog2Hist:
         result = box64_steam.format_log2_hist(
             _make_hist([(10, 5)]), val_type="ns")
         assert "us" in result or "ns" in result or "ms" in result
-
-
-def test_memleak_has_no_format_log2_hist():
-    import box64_memleak
-    assert not hasattr(box64_memleak, "format_log2_hist")

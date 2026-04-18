@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import box64_common
 import box64_dynarec
 import box64_steam
 
@@ -136,8 +137,7 @@ class TestBothToolsConsistent:
 # _bcc_has_atomic_increment detection
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("module", [box64_dynarec, box64_steam],
-                         ids=["dynarec", "steam"])
+@pytest.mark.parametrize("module", [box64_common], ids=["common"])
 class TestBccHasAtomicIncrement:
     def test_returns_true_when_bpf_succeeds(self, module, monkeypatch):
         """If BPF() compiles without error, detection returns True."""
@@ -158,13 +158,3 @@ class TestBccHasAtomicIncrement:
         assert module._bcc_has_atomic_increment() is False
 
 
-def test_memleak_has_no_detection():
-    """box64_memleak has no atomic_increment usage, so no detection."""
-    import box64_memleak
-    assert not hasattr(box64_memleak, "_bcc_has_atomic_increment")
-
-
-def test_memleak_has_no_rewrite():
-    """box64_memleak has no atomic_increment usage, so no rewrite."""
-    import box64_memleak
-    assert not hasattr(box64_memleak, "_rewrite_atomic_increment")

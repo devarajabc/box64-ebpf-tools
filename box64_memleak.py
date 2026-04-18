@@ -32,15 +32,6 @@ except ImportError:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def fmt_size(n):
-    """Human-readable byte size."""
-    for unit in ("B", "KB", "MB", "GB"):
-        if abs(n) < 1024.0:
-            return f"{n:.1f} {unit}"
-        n /= 1024.0
-    return f"{n:.1f} TB"
-
-
 def check_binary(path):
     """Verify binary exists and is readable."""
     if not os.path.isfile(path):
@@ -108,74 +99,6 @@ def read_minflt(pid):
             return int(fields[9])
     except (OSError, ValueError, IndexError):
         return 0
-
-
-def _clear_stale_uprobes(binary):
-    """Clear stale uprobe events and force a fresh inode for the binary.
-
-    Works around a kernel bug where stale ref_ctr_offset values persist in the
-    uprobe inode cache, causing perf_event_open to fail with EINVAL.
-    """
-    import shutil
-    try:
-        # Clear all uprobe events
-        uprobe_events = "/sys/kernel/debug/tracing/uprobe_events"
-        if os.path.exists(uprobe_events):
-            with open(uprobe_events, "w") as f:
-                f.write("")
-    except OSError:
-        pass
-    try:
-        # Force a new inode: copy then atomic rename back.
-        # The kernel caches stale ref_ctr_offset per inode; a new inode
-        # guarantees a clean slate.
-        tmp = binary + ".uprobe_fix"
-        shutil.copy2(binary, tmp)
-        os.rename(tmp, binary)
-        os.sync()
-        # Drop kernel caches to release old inode references
-        with open("/proc/sys/vm/drop_caches", "w") as f:
-            f.write("3\n")
-    except OSError:
-        pass  # best-effort; may still work without this
-
-
-def _patch_bcc_uretprobe():
-    """Fix BCC 0.29.1 aarch64 bug: lib.bpf_attach_uprobe missing 7th arg.
-
-    On aarch64, the missing ref_ctr_offset parameter picks up garbage from
-    register x6, corrupting perf_event_attr.config and causing EINVAL when
-    a uprobe and uretprobe target the same symbol. This monkey-patches the
-    ctypes binding to always pass ref_ctr_offset=0.
-    """
-    import platform
-    if platform.machine() != "aarch64":
-        return
-    try:
-        import ctypes as ct
-        from bcc import libbcc
-        lib = libbcc.lib
-        original = lib.bpf_attach_uprobe
-        # Fix argtypes to include the 7th ref_ctr_offset parameter
-        lib.bpf_attach_uprobe.argtypes = [
-            ct.c_int,       # prog_fd
-            ct.c_int,       # attach_type (uprobe vs uretprobe)
-            ct.c_char_p,    # ev_name
-            ct.c_char_p,    # binary_path
-            ct.c_uint64,    # offset
-            ct.c_int,       # pid
-            ct.c_uint32,    # ref_ctr_offset
-        ]
-        lib.bpf_attach_uprobe.restype = ct.c_int
-
-        def _patched_attach_uprobe(*args):
-            if len(args) == 6:
-                args = args + (ct.c_uint32(0),)
-            return original(*args)
-
-        lib.bpf_attach_uprobe = _patched_attach_uprobe
-    except Exception as e:
-        print(f"WARNING: failed to patch BCC uretprobe binding: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -778,7 +701,14 @@ def parse_args():
     return p.parse_args()
 
 
-from box64_common import correlate_thread_parents, compute_cow_deltas, rank_items
+from box64_common import (
+    correlate_thread_parents,
+    compute_cow_deltas,
+    rank_items,
+    fmt_size,
+    _clear_stale_uprobes,
+    _patch_bcc_uretprobe,
+)
 
 
 # ---------------------------------------------------------------------------
