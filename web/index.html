@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>box64 trace observatory</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header id="overview">
+  <div class="brand">box64_trace <span class="sub">observatory</span></div>
+  <div class="gauges">
+    <div class="gauge" id="g-allocs">
+      <svg viewBox="0 0 80 50"><path id="g-allocs-arc" class="arc"/></svg>
+      <div class="g-val" id="g-allocs-val">0</div>
+      <div class="g-label">allocs/s</div>
+    </div>
+    <div class="gauge" id="g-jit">
+      <svg viewBox="0 0 80 50"><path id="g-jit-arc" class="arc"/></svg>
+      <div class="g-val" id="g-jit-val">0</div>
+      <div class="g-label">JIT MB</div>
+    </div>
+    <div class="gauge" id="g-fork">
+      <svg viewBox="0 0 80 50"><path id="g-fork-arc" class="arc"/></svg>
+      <div class="g-val" id="g-fork-val">0</div>
+      <div class="g-label">forks</div>
+    </div>
+    <div class="gauge" id="g-threads">
+      <svg viewBox="0 0 80 50"><path id="g-threads-arc" class="arc"/></svg>
+      <div class="g-val" id="g-threads-val">0</div>
+      <div class="g-label">threads</div>
+    </div>
+  </div>
+  <div class="meta">
+    <span id="guest">--</span> |
+    <button id="btn-pause" title="Pause polling">Pause</button>
+  </div>
+</header>
+
+<main class="grid">
+  <section class="panel wide" id="p-alloc">
+    <h2>Allocator</h2>
+    <canvas id="c-alloc" height="180"></canvas>
+    <div class="panel-stats">
+      <span>malloc: <b id="s-malloc">0</b></span>
+      <span>free: <b id="s-free">0</b></span>
+      <span>bytes: <b id="s-bytes">0</b></span>
+    </div>
+  </section>
+
+  <section class="panel" id="p-jit">
+    <h2>JIT Blocks</h2>
+    <canvas id="c-jit" height="180"></canvas>
+    <div class="panel-stats">
+      <span>alloc: <b id="s-jit-alloc">0</b></span>
+      <span>free: <b id="s-jit-free">0</b></span>
+      <span>outstanding: <b id="s-jit-out">0</b></span>
+    </div>
+  </section>
+
+  <section class="panel" id="p-process">
+    <h2>Process Lifecycle</h2>
+    <canvas id="c-process" height="180"></canvas>
+    <div class="panel-stats">
+      <span>fork: <b id="s-fork">0</b></span>
+      <span>vfork: <b id="s-vfork">0</b></span>
+      <span>exec: <b id="s-exec">0</b></span>
+    </div>
+  </section>
+
+  <section class="panel" id="p-prot">
+    <h2>JIT Protection</h2>
+    <canvas id="c-prot" height="180"></canvas>
+  </section>
+
+  <section class="panel wide" id="p-events">
+    <h2>Event Feed</h2>
+    <div id="event-feed" class="feed"></div>
+  </section>
+</main>
+
+<script src="/js/chart.umd.min.js"></script>
+<script src="/js/state.js"></script>
+<script src="/js/gauges.js"></script>
+<script src="/js/charts.js"></script>
+<script src="/js/events.js"></script>
+<script src="/js/telemetry.js"></script>
+<script src="/js/polling.js"></script>
+<script src="/js/controls.js"></script>
+<script src="/js/main.js"></script>
+</body>
+</html>

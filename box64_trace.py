@@ -1501,6 +1501,9 @@ def parse_args():
                    help="BPF hash table capacity for outstanding alloc tracking (default: 524288)")
     p.add_argument("--sample-freq", type=int, default=0,
                    help="PC sampling frequency in Hz for block profiling (0=off, 4999=recommended, max ~9999)")
+    p.add_argument("--web", type=int, nargs="?", const=8642, default=0, metavar="PORT",
+                   help="Start a web dashboard on http://127.0.0.1:PORT (default 8642). "
+                        "Uses kbox-derived frontend in web/.")
     return p.parse_args()
 
 
@@ -2108,6 +2111,66 @@ def main():
     def read_stats():
         st = b["steam_stats"]
         return [st[st.Key(i)].value for i in range(32)]
+
+    # ---- Web dashboard snapshot (only built if --web is on) ----
+    def web_snapshot():
+        v = read_stats()
+        # thread_counters: 0=create_entry,1=create_return,2=start_entry,
+        # 3=destroy_entry,4=fork_entry,5=clone_entry
+        tc = [0] * 6
+        if track_threads:
+            tcm = b["thread_counters"]
+            tc = [tcm[tcm.Key(i)].value for i in range(6)]
+        return {
+            "timestamp_ns": time.monotonic_ns(),
+            "alloc": {
+                "malloc": v[0], "free": v[1], "calloc": v[2], "realloc": v[3],
+                "bytes_allocated": v[4], "bytes_freed": v[5],
+            },
+            "jit": {
+                "alloc_count": v[6], "free_count": v[7],
+                "bytes_allocated": v[8], "bytes_freed": v[9],
+                "outstanding_bytes": v[22], "outstanding_blocks": v[31],
+                "churn": v[21],
+                "invalidations": v[29], "dirty_marks": v[30],
+            },
+            "mmap": {
+                "internal_mmap": v[10], "internal_munmap": v[11],
+                "box_mmap": v[12], "box_munmap": v[13],
+            },
+            "process": {
+                "fork": v[14], "vfork": v[15], "exec": v[16],
+                "posix_spawn": v[17],
+                "new_context": v[18], "free_context": v[19],
+                "pressure_vessel": v[20],
+            },
+            "protection": {
+                "protectDB_calls": v[23], "unprotectDB_calls": v[24],
+                "setProtection_calls": v[25],
+                "protectDB_bytes": v[26], "unprotectDB_bytes": v[27],
+                "setProtection_bytes": v[28],
+            },
+            "threads": {
+                "create_entry": tc[0], "create_return": tc[1],
+                "start_entry": tc[2], "destroy_entry": tc[3],
+                "fork_entry": tc[4], "clone_entry": tc[5],
+            },
+        }
+
+    def web_stats_meta():
+        return {
+            "binary": binary,
+            "filter_pid": args.pid if args.pid else 0,
+            "interval": args.interval,
+            "guest": os.path.basename(binary),
+            "track": {
+                "mem": not args.no_mem, "dynarec": not args.no_dynarec,
+                "mmap": not args.no_mmap, "threads": track_threads,
+                "cow": track_cow, "prot": track_prot,
+                "block_detail": track_block_detail,
+                "profile": track_profile,
+            },
+        }
 
     # ---- Periodic summary ----
     def print_periodic(vals, prev_vals):
@@ -2962,6 +3025,19 @@ def main():
                               f"{fmt_size(pp['cold_size']):>12s}")
 
         print("\n" + "=" * 76)
+
+    # ---- Optional web dashboard ----
+    if args.web:
+        try:
+            import box64_web
+            box64_web.start(args.web, web_snapshot, web_stats_meta)
+            # Expose emit_event so probe handlers can stream events
+            _web_emit = box64_web.emit_event
+        except Exception as e:
+            print(f"WARNING: failed to start web dashboard: {e}")
+            _web_emit = None
+    else:
+        _web_emit = None
 
     # ---- Main loop ----
     prev_vals = read_stats()
