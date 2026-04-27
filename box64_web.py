@@ -188,5 +188,24 @@ def start(port, snapshot_fn, stats_fn, history_interval=3.0, host="127.0.0.1"):
     server.daemon_threads = True
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
-    print(f"[*] Web dashboard: http://{host}:{port}/")
+    url = f"http://{host}:{port}/"
+    print(f"[*] Web dashboard: {url}")
+
+    # Best-effort auto-open. Under sudo, browsers can't reach the user's
+    # X/Wayland session — try launching as $SUDO_USER first.
+    sudo_user = os.environ.get("SUDO_USER")
+    try:
+        if sudo_user and os.geteuid() == 0:
+            import subprocess
+            subprocess.Popen(
+                ["sudo", "-u", sudo_user, "xdg-open", url],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        else:
+            import webbrowser
+            webbrowser.open(url, new=2)
+    except Exception:
+        pass  # silent fallback — URL is printed above
+
     return server
