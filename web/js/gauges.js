@@ -127,5 +127,108 @@ var KGauges = {
       document.getElementById('s-vfork').textContent = snap.process.vfork;
       document.getElementById('s-exec').textContent = snap.process.exec;
     }
+
+    /* Cache-policy panels */
+    if (snap.histograms) {
+      this.renderHist('hist-alloc-sizes',
+        snap.histograms.alloc_sizes, this._fmtSizeRange);
+      this.renderHist('hist-block-lifetimes',
+        snap.histograms.block_lifetimes, this._fmtNsRange);
+    }
+    if (snap.top_churned) this.renderChurnTable(snap.top_churned);
+    if (snap.top_blocks) this.renderTopBlocks(snap.top_blocks);
+    if (snap.jit) {
+      var inv = document.getElementById('s-invalid');
+      var mark = document.getElementById('s-mark');
+      var ch = document.getElementById('s-churn-total');
+      if (inv) inv.textContent = snap.jit.invalidations;
+      if (mark) mark.textContent = snap.jit.dirty_marks;
+      if (ch) ch.textContent = snap.jit.churn;
+    }
+  },
+
+  /* Format a log2 bucket [2^k, 2^(k+1)) as a human-readable byte range. */
+  _fmtSizeRange: function(b) {
+    var lo = b === 0 ? 0 : Math.pow(2, b);
+    var hi = Math.pow(2, b + 1) - 1;
+    return KGauges.fmtBytes(lo) + '-' + KGauges.fmtBytes(hi);
+  },
+
+  /* Format a log2 bucket as a human-readable nanosecond range. */
+  _fmtNsRange: function(b) {
+    var fmt = function(ns) {
+      if (ns < 1000) return ns + 'ns';
+      if (ns < 1e6) return (ns/1000).toFixed(0) + 'us';
+      if (ns < 1e9) return (ns/1e6).toFixed(0) + 'ms';
+      return (ns/1e9).toFixed(1) + 's';
+    };
+    var lo = b === 0 ? 0 : Math.pow(2, b);
+    var hi = Math.pow(2, b + 1) - 1;
+    return fmt(lo) + '-' + fmt(hi);
+  },
+
+  /* Render a log2 histogram as horizontal CSS bars. */
+  renderHist: function(elId, buckets, fmtRange) {
+    var el = document.getElementById(elId);
+    if (!el) return;
+    if (!buckets || !buckets.length) {
+      el.innerHTML = '<div class="hist-empty">(no samples yet)</div>';
+      return;
+    }
+    var max = 0;
+    for (var i = 0; i < buckets.length; i++) {
+      if (buckets[i].count > max) max = buckets[i].count;
+    }
+    if (max <= 0) max = 1;
+    var html = '';
+    for (i = 0; i < buckets.length; i++) {
+      var b = buckets[i];
+      var pct = Math.round(100 * b.count / max);
+      html += '<div class="hist-row">' +
+              '<div class="hist-label">' + fmtRange(b.bucket) + '</div>' +
+              '<div class="hist-bar-wrap">' +
+              '<div class="hist-bar" style="width:' + pct + '%"></div>' +
+              '</div>' +
+              '<div class="hist-count">' + this.fmtNum(b.count) + '</div>' +
+              '</div>';
+    }
+    el.innerHTML = html;
+  },
+
+  renderChurnTable: function(rows) {
+    var tbody = document.getElementById('churn-tbody');
+    if (!tbody) return;
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="2" class="empty">(no churn yet)</td></tr>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var addr = '0x' + r.x64_addr.toString(16).padStart(8, '0');
+      html += '<tr><td><code>' + addr + '</code></td>' +
+              '<td class="num">' + r.count + '</td></tr>';
+    }
+    tbody.innerHTML = html;
+  },
+
+  renderTopBlocks: function(rows) {
+    var tbody = document.getElementById('top-blocks-tbody');
+    if (!tbody) return;
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="4" class="empty">(no live blocks)</td></tr>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var x64 = '0x' + r.x64_addr.toString(16).padStart(8, '0');
+      var ah = '0x' + r.alloc_addr.toString(16).padStart(8, '0');
+      html += '<tr><td><code>' + x64 + '</code></td>' +
+              '<td><code>' + ah + '</code></td>' +
+              '<td class="num">' + this.fmtBytes(r.size) + '</td>' +
+              '<td class="num">' + r.pid + '</td></tr>';
+    }
+    tbody.innerHTML = html;
   }
 };

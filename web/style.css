@@ -291,3 +291,108 @@ body.light .kh-tooltip {
 .feed .ev.process { border-left: 3px solid #5b9cf2; padding-left: 6px; }
 .feed .ev.jit { border-left: 3px solid #a05ed9; padding-left: 6px; }
 .feed .ev.cow { border-left: 3px solid #f29c5b; padding-left: 6px; }
+
+/* ----- Cache-policy panels ----- */
+
+/* Histograms — log2 buckets rendered as horizontal CSS bars. */
+.hist {
+  font-family: monospace;
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.hist-row {
+  display: grid;
+  grid-template-columns: 110px 1fr 50px;
+  gap: 6px;
+  align-items: center;
+}
+.hist-label { color: rgba(127,127,127,0.85); white-space: nowrap; }
+.hist-bar-wrap {
+  background: rgba(127,127,127,0.10);
+  height: 10px;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.hist-bar {
+  background: linear-gradient(90deg, #5b9cf2, #a05ed9);
+  height: 100%;
+}
+.hist-count { text-align: right; color: rgba(127,127,127,0.7); }
+.hist-empty {
+  text-align: center;
+  font-style: italic;
+  color: rgba(127,127,127,0.6);
+  padding: 12px;
+}
+
+/* Cache tables (top-churned, top-blocks) — same look as pid-table. */
+.cache-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: monospace;
+  font-size: 12px;
+}
+.cache-table th, .cache-table td {
+  padding: 4px 8px;
+  text-align: left;
+  border-bottom: 1px solid rgba(127,127,127,0.15);
+}
+.cache-table th {
+  font-weight: 600;
+  background: rgba(127,127,127,0.07);
+  position: sticky;
+  top: 0;
+}
+.cache-table .num { text-align: right; }
+.cache-table td.empty {
+  text-align: center;
+  color: rgba(127,127,127,0.6);
+  font-style: italic;
+  padding: 16px;
+}
+.cache-table code {
+  font-size: 11px;
+  color: #a05ed9;
+}
+
+/* Bound height on cache tables — they can grow unbounded. */
+#p-churn, #p-top-blocks {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* Invalidation KPI strip */
+.kpis {
+  display: flex;
+  gap: 12px;
+  padding: 6px 0 12px 0;
+}
+.kpi {
+  flex: 1;
+  text-align: center;
+  padding: 8px;
+  border: 1px solid rgba(127,127,127,0.15);
+  border-radius: 4px;
+}
+.kpi-label {
+  font-size: 11px;
+  color: rgba(127,127,127,0.8);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.kpi-val {
+  font-size: 20px;
+  font-weight: 600;
+  font-family: monospace;
+  margin-top: 4px;
+}
+
+/* Section subtitle */
+.panel h2 .hint {
+  font-size: 11px;
+  font-weight: 400;
+  color: rgba(127,127,127,0.7);
+  margin-left: 6px;
+}

@@ -91,6 +91,58 @@
     </table>
   </section>
 
+  <!-- ===== Cache-policy panels ===== -->
+
+  <section class="panel" id="p-alloc-hist">
+    <h2>Allocation Size Distribution</h2>
+    <div class="hist" id="hist-alloc-sizes"></div>
+  </section>
+
+  <section class="panel" id="p-lifetime-hist">
+    <h2>Block Lifetime Distribution</h2>
+    <div class="hist" id="hist-block-lifetimes"></div>
+  </section>
+
+  <section class="panel" id="p-invalidations">
+    <h2>Invalidations</h2>
+    <div class="kpis">
+      <div class="kpi"><div class="kpi-label">InvalidDynablock</div>
+        <div class="kpi-val" id="s-invalid">0</div></div>
+      <div class="kpi"><div class="kpi-label">MarkDynablock</div>
+        <div class="kpi-val" id="s-mark">0</div></div>
+      <div class="kpi"><div class="kpi-label">Churn (rapid free)</div>
+        <div class="kpi-val" id="s-churn-total">0</div></div>
+    </div>
+    <canvas id="c-invalid" height="120"></canvas>
+  </section>
+
+  <section class="panel" id="p-churn">
+    <h2>Top Churned x64 Addresses
+      <span class="hint">most-recompiled blocks → SMC / re-JIT pressure</span></h2>
+    <table class="cache-table">
+      <thead>
+        <tr><th>x64 Address</th><th class="num">Churn count</th></tr>
+      </thead>
+      <tbody id="churn-tbody"></tbody>
+    </table>
+  </section>
+
+  <section class="panel wide" id="p-top-blocks">
+    <h2>Top Outstanding JIT Blocks by Size
+      <span class="hint">largest live blocks → eviction targets</span></h2>
+    <table class="cache-table">
+      <thead>
+        <tr>
+          <th>x64 Address</th>
+          <th>Alloc Address</th>
+          <th class="num">Size</th>
+          <th class="num">PID</th>
+        </tr>
+      </thead>
+      <tbody id="top-blocks-tbody"></tbody>
+    </table>
+  </section>
+
   <section class="panel wide" id="p-events">
     <h2>Event Feed</h2>
     <div id="event-feed" class="feed"></div>

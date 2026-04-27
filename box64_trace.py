@@ -2131,6 +2131,37 @@ def main():
         return [st[st.Key(i)].value for i in range(32)]
 
     # ---- Web dashboard snapshot (only built if --web is on) ----
+    def _hist_snapshot(map_name):
+        """Read a BPF_HISTOGRAM into a list of {bucket, count} dicts."""
+        try:
+            hm = b[map_name]
+        except (KeyError, IndexError):
+            return []
+        out = []
+        for k, v in hm.items():
+            cnt = v.value
+            if cnt > 0:
+                out.append({"bucket": k.value, "count": cnt})
+        out.sort(key=lambda r: r["bucket"])
+        return out
+
+    def _top_blocks_snapshot(n=20):
+        """Top outstanding JIT blocks by size — informs largest-block eviction."""
+        try:
+            jb = b["jit_blocks"]
+        except (KeyError, IndexError):
+            return []
+        rows = []
+        for k, v in jb.items():
+            rows.append({
+                "alloc_addr": int(k.value),
+                "x64_addr": int(v.x64_addr),
+                "size": int(v.size),
+                "pid": int(v.pid),
+            })
+        rows.sort(key=lambda r: r["size"], reverse=True)
+        return rows[:n]
+
     def _per_pid_snapshot():
         """Per-PID breakdown read from proc_mem BPF hash + thread_stats.
 
@@ -2210,6 +2241,19 @@ def main():
                 "fork_entry": tc[4], "clone_entry": tc[5],
             },
             "pids": _per_pid_snapshot(),
+            "histograms": {
+                "alloc_sizes": _hist_snapshot("alloc_sizes"),
+                "block_lifetimes": _hist_snapshot("block_lifetimes"),
+            },
+            "top_blocks": _top_blocks_snapshot(20),
+            # churned_x64_addrs is built by handle_churn_event in main().
+            # Take a sorted top-20 snapshot.
+            "top_churned": [
+                {"x64_addr": addr, "count": cnt}
+                for addr, cnt in sorted(
+                    churned_x64_addrs.items(), key=lambda kv: kv[1], reverse=True
+                )[:20]
+            ],
         }
 
     def web_stats_meta():
