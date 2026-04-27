@@ -6,7 +6,7 @@ internal functions at runtime with minimal overhead and no recompilation.
 | Tool | Purpose | Docs |
 |------|---------|------|
 | `box64_memleak.py` | Memory leak detection for Box64's custom allocator | [docs/box64_memleak.md](docs/box64_memleak.md) |
-| `box64_trace.py` | Multi-process Steam tracer (fork/exec, per-PID memory, JIT, mmap, pressure-vessel, DynaRec JIT block analysis) | [docs/box64_trace.md](docs/box64_trace.md) |
+| `box64_trace.py` | Multi-process Box64 tracer: DynaRec JIT block analysis (churn, lifetimes, protection), fork/exec lifecycle, per-PID memory, mmap, CoW page faults, PC sampling profiler, pressure-vessel container detection | [docs/box64_trace.md](docs/box64_trace.md) |
 
 Both tools share [`box64_common.py`](box64_common.py) — 14 helpers for
 nm-based symbol validation, `/proc` parsing, BCC/kernel workarounds, CoW
@@ -48,8 +48,9 @@ sudo make install
 # Find memory leaks in Box64's allocator
 sudo python3 box64_memleak.py -p <PID>
 
-# Profile a full Steam gaming session (multi-process, includes JIT block
-# churn/lifetime analysis, per-PID memory, fork/exec lifecycle, CoW)
+# Profile across all box64 processes (JIT block churn/lifetimes, per-PID
+# memory, fork/exec lifecycle, CoW page faults). Designed for Steam
+# gaming sessions where 5-10+ box64 instances run concurrently.
 sudo python3 box64_trace.py
 ```
 
@@ -60,9 +61,9 @@ Press **Ctrl+C** when done to get the full report.
 ## Project layout
 
 ```
-box64_common.py         ~270 lines  shared helpers (see table below)
-box64_memleak.py       ~1180 lines  custom-allocator leak detector
-box64_trace.py         ~3000 lines  multi-process Steam tracer (also covers JIT block analysis)
+box64_common.py        ~270 lines   shared helpers (see table below)
+box64_memleak.py      ~1180 lines   custom-allocator leak detector
+box64_trace.py        ~3000 lines   multi-process tracer: JIT, fork/exec, memory, CoW
 
 tests/                              223 unit tests + 3 upstream-compat tests
   conftest.py                       mocks the `bcc` module so tests run without it
@@ -90,7 +91,7 @@ across the tools:
 ## Documentation
 
 - **[`docs/box64_memleak.md`](docs/box64_memleak.md)** -- Options, output format, required symbols for the memory leak detector.
-- **[`docs/box64_trace.md`](docs/box64_trace.md)** -- Options, output format, required symbols for the multi-process Steam tracer.
+- **[`docs/box64_trace.md`](docs/box64_trace.md)** -- Options, output format, required symbols for the multi-process tracer.
 - **[`docs/HOW_BOX64_WORKS.md`](docs/HOW_BOX64_WORKS.md)** -- How Box64 executes an x86_64 binary, from ELF loading through DynaRec JIT to syscall translation.
 - **[`docs/BOX64_FORK_EXEC_MEMORY.md`](docs/BOX64_FORK_EXEC_MEMORY.md)** -- Box64's fork/exec/clone mechanisms, custom allocator, DynaRec JIT block management, and pressure-vessel Steam containers.
 - **[`docs/BOX64_STEAM_INTERNALS.md`](docs/BOX64_STEAM_INTERNALS.md)** -- How Box64's pressure-vessel shim works: Steam detection, environment variable translation, D-Bus bypass, multi-process re-invocation model.
@@ -125,7 +126,7 @@ BCC supports `table.atomic_increment()`; older BCC versions fall back to
 ```bash
 pip install -r requirements-dev.txt
 
-# 311 fast unit tests (no root, no BCC required — conftest.py mocks it)
+# 223 fast unit tests (no root, no BCC required — conftest.py mocks it)
 pytest tests/ --tb=short \
     --ignore=tests/test_upstream_compat.py \
     --ignore=tests/test_ebpf_integration.py
