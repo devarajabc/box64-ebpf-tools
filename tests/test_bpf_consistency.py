@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS = ["box64_dynarec.py", "box64_memleak.py", "box64_steam.py"]
+SCRIPTS = ["box64_memleak.py", "box64_trace.py"]
 
 
 def _extract_bpf_source(text):

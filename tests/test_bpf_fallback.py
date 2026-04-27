@@ -1,4 +1,4 @@
-"""Verify box64_steam BPF compile fallback distinguishes genuine
+"""Verify box64_trace BPF compile fallback distinguishes genuine
 TRACK_PROFILE / BCC incompatibility from unrelated BCC/kernel errors
 (B2). Previously the fallback caught `Exception` unconditionally and
 always blamed TRACK_PROFILE when `--sample-freq` was set, masking
@@ -6,7 +6,7 @@ missing-header, kernel-version, and permission errors.
 """
 import pytest
 
-import box64_steam
+import box64_trace
 
 
 class _StopMain(BaseException):
@@ -18,13 +18,13 @@ class _StopMain(BaseException):
 
 def _setup_main_mocks(monkeypatch):
     """Stub the heavy side-effectful helpers main() runs before BPF()."""
-    monkeypatch.setattr(box64_steam, "check_binary", lambda *a, **kw: None)
-    monkeypatch.setattr(box64_steam, "check_symbols", lambda *a, **kw: True)
-    monkeypatch.setattr(box64_steam, "check_symbols_soft", lambda *a, **kw: [])
-    monkeypatch.setattr(box64_steam, "_read_symbols", lambda *a, **kw: "")
-    monkeypatch.setattr(box64_steam, "_clear_stale_uprobes", lambda *a, **kw: None)
-    monkeypatch.setattr(box64_steam, "_patch_bcc_uretprobe", lambda *a, **kw: None)
-    monkeypatch.setattr(box64_steam, "_bcc_has_atomic_increment", lambda: True)
+    monkeypatch.setattr(box64_trace, "check_binary", lambda *a, **kw: None)
+    monkeypatch.setattr(box64_trace, "check_symbols", lambda *a, **kw: True)
+    monkeypatch.setattr(box64_trace, "check_symbols_soft", lambda *a, **kw: [])
+    monkeypatch.setattr(box64_trace, "_read_symbols", lambda *a, **kw: "")
+    monkeypatch.setattr(box64_trace, "_clear_stale_uprobes", lambda *a, **kw: None)
+    monkeypatch.setattr(box64_trace, "_patch_bcc_uretprobe", lambda *a, **kw: None)
+    monkeypatch.setattr(box64_trace, "_bcc_has_atomic_increment", lambda: True)
 
 
 def _install_mock_bpf(monkeypatch, side_effects):
@@ -43,7 +43,7 @@ def _install_mock_bpf(monkeypatch, side_effects):
             raise side_effects[idx]
         raise _StopMain()
 
-    monkeypatch.setattr(box64_steam, "BPF", mock_bpf)
+    monkeypatch.setattr(box64_trace, "BPF", mock_bpf)
     return calls
 
 
@@ -59,7 +59,7 @@ class TestBpfCompileFallback:
         calls = _install_mock_bpf(monkeypatch, [err])
 
         with pytest.raises(RuntimeError, match="missing kernel header"):
-            box64_steam.main()
+            box64_trace.main()
 
         assert len(calls) == 1, "must not retry on unrelated errors"
 
@@ -72,7 +72,7 @@ class TestBpfCompileFallback:
         calls = _install_mock_bpf(monkeypatch, [err, None])
 
         with pytest.raises(_StopMain):
-            box64_steam.main()
+            box64_trace.main()
 
         assert len(calls) == 2
         assert any("TRACK_PROFILE" in f for f in calls[0])
@@ -88,7 +88,7 @@ class TestBpfCompileFallback:
         calls = _install_mock_bpf(monkeypatch, [err, None])
 
         with pytest.raises(_StopMain):
-            box64_steam.main()
+            box64_trace.main()
 
         assert len(calls) == 2
 
@@ -102,7 +102,7 @@ class TestBpfCompileFallback:
         calls = _install_mock_bpf(monkeypatch, [orig, retry])
 
         with pytest.raises(RuntimeError, match="even after disabling TRACK_PROFILE") as exc_info:
-            box64_steam.main()
+            box64_trace.main()
 
         assert "cannot emit bpf_perf_event_data" in str(exc_info.value)
         assert exc_info.value.__cause__ is retry
@@ -117,6 +117,6 @@ class TestBpfCompileFallback:
         calls = _install_mock_bpf(monkeypatch, [err])
 
         with pytest.raises(Exception, match="any random BPF compile error"):
-            box64_steam.main()
+            box64_trace.main()
 
         assert len(calls) == 1

@@ -116,25 +116,19 @@ All binaries are run in sequence during each tool test. Individual binary failur
 
 The integration test harness (`tests/test_ebpf_integration.py`) orchestrates:
 
-1. Starts an eBPF tool (`box64_dynarec.py`, `box64_memleak.py`, or `box64_steam.py`) in the background
+1. Starts an eBPF tool (`box64_memleak.py` or `box64_trace.py`) in the background
 2. Polls tool stdout for "probes attached" (BPF compilation takes 4–6s on ARM64)
 3. Runs Box64 with each test binary in sequence — exercising DynaRec JIT, `customMalloc`, protection calls, etc.
 4. Waits 2s grace period for the final eBPF poll cycle
 5. Sends `SIGINT` to the tool, triggering `print_final_report()`
 6. Parses stdout and asserts correctness
 
-Assertions for `box64_dynarec.py`:
-- Output contains `FINAL REPORT`
-- `AllocDynarecMap` count > 0 (Box64 must JIT-compile x86_64 code)
-- `Bytes allocated` > 0
-- No Python tracebacks
-
 Assertions for `box64_memleak.py`:
 - Output contains `FINAL REPORT`
 - `Total mallocs` count > 0 (Box64 uses `customMalloc` internally)
 - No Python tracebacks
 
-Assertions for `box64_steam.py` (default flags — all features enabled):
+Assertions for `box64_trace.py` (default flags — all features enabled):
 - Output contains `FINAL REPORT`
 - `fork` count >= 10
 - `vfork` count >= 10
@@ -146,7 +140,7 @@ Assertions for `box64_steam.py` (default flags — all features enabled):
 - `Per-PID Memory Breakdown` present with >= 10 PID sections
 - No Python tracebacks
 
-Assertions for `box64_steam.py` (PC sampling — `--sample-freq 4999`):
+Assertions for `box64_trace.py` (PC sampling — `--sample-freq 4999`):
 - If BCC doesn't support `TRACK_PROFILE` compilation: **SKIP** (not FAIL) — the tool retries without PC sampling and the test verifies it still produces a `FINAL REPORT`
 - Output contains `FINAL REPORT`
 - `NewBox64Context` count >= 1
@@ -154,7 +148,7 @@ Assertions for `box64_steam.py` (PC sampling — `--sample-freq 4999`):
 - No Python tracebacks
 
 Assertions for output correctness (baseline vs probed comparison):
-- Runs each testNN binary twice: once without probes (baseline), once with `box64_dynarec.py` uprobes attached
+- Runs each testNN binary twice: once without probes (baseline), once with `box64_trace.py` uprobes attached (its probe set is a superset of dynarec's)
 - For each binary that exits 0 in both runs: stdout must match exactly
 - Detects instrumentation-induced perturbations without relying on upstream refNN.txt files (which may diverge on ARM64 due to known FP-precision differences)
 

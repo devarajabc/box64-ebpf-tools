@@ -1,17 +1,16 @@
 """Tests for symbol-checking functions: check_binary, _read_symbols,
-check_symbols, check_symbols_soft, check_dynarec_symbols."""
+check_symbols, check_symbols_soft."""
 import os
 import subprocess
 
 import pytest
 
 import box64_common
-import box64_dynarec
 import box64_memleak
-import box64_steam
+import box64_trace
 
 
-MODULES = [box64_dynarec, box64_memleak, box64_steam]
+MODULES = [box64_memleak, box64_trace]
 
 
 # ---------------------------------------------------------------------------
@@ -19,7 +18,7 @@ MODULES = [box64_dynarec, box64_memleak, box64_steam]
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("module", MODULES,
-                         ids=["dynarec", "memleak", "steam"])
+                         ids=["memleak", "steam"])
 class TestCheckBinary:
     def test_existing_readable_file(self, module, tmp_path):
         f = tmp_path / "box64"
@@ -49,7 +48,7 @@ class TestCheckBinary:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("module", MODULES,
-                         ids=["dynarec", "memleak", "steam"])
+                         ids=["memleak", "steam"])
 class TestReadSymbols:
     def test_returns_string(self, module, tmp_path):
         f = tmp_path / "dummy"
@@ -103,31 +102,7 @@ class TestReadSymbols:
 # check_symbols()
 # ---------------------------------------------------------------------------
 
-class TestCheckSymbolsDynarec:
-    """Dynarec's check_symbols returns bool."""
-
-    def test_all_present(self, monkeypatch):
-        monkeypatch.setattr(box64_dynarec, "_read_symbols",
-                            lambda p: "AllocDynarecMap\nFreeDynarecMap\n")
-        result = box64_dynarec.check_symbols(
-            "/fake", ["AllocDynarecMap", "FreeDynarecMap"])
-        assert result is True
-
-    def test_some_missing(self, monkeypatch):
-        monkeypatch.setattr(box64_dynarec, "_read_symbols",
-                            lambda p: "AllocDynarecMap\n")
-        result = box64_dynarec.check_symbols(
-            "/fake", ["AllocDynarecMap", "FreeDynarecMap"])
-        assert result is False
-
-    def test_nm_fails_returns_true(self, monkeypatch):
-        """When nm fails, assume symbols are present."""
-        monkeypatch.setattr(box64_dynarec, "_read_symbols", lambda p: "")
-        result = box64_dynarec.check_symbols("/fake", ["AllocDynarecMap"])
-        assert result is True
-
-
-@pytest.mark.parametrize("module", [box64_memleak, box64_steam],
+@pytest.mark.parametrize("module", [box64_memleak, box64_trace],
                          ids=["memleak", "steam"])
 class TestCheckSymbolsExitOnMissing:
     """Memleak and steam call sys.exit on missing symbols."""
@@ -177,24 +152,3 @@ class TestCheckSymbolsSoft:
         assert module.check_symbols_soft("/fake", ["symA"]) == []
 
 
-# ---------------------------------------------------------------------------
-# check_dynarec_symbols() — dynarec only
-# ---------------------------------------------------------------------------
-
-class TestCheckDynarecSymbols:
-    def test_both_present(self, monkeypatch):
-        monkeypatch.setattr(box64_dynarec, "_read_symbols",
-                            lambda p: "AllocDynarecMap\nFreeDynarecMap\n")
-        box64_dynarec.check_dynarec_symbols("/fake")  # should not exit
-
-    def test_missing_exits(self, monkeypatch):
-        monkeypatch.setattr(box64_dynarec, "_read_symbols",
-                            lambda p: "SomeOtherSymbol\n")
-        with pytest.raises(SystemExit):
-            box64_dynarec.check_dynarec_symbols("/fake")
-
-    def test_nm_fails_warns_but_continues(self, monkeypatch, capsys):
-        monkeypatch.setattr(box64_dynarec, "_read_symbols", lambda p: "")
-        box64_dynarec.check_dynarec_symbols("/fake")  # should not exit
-        captured = capsys.readouterr()
-        assert "WARNING" in captured.out

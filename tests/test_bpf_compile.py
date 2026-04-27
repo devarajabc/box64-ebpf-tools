@@ -103,17 +103,6 @@ def compile_in_subprocess(bpf_src, cflags):
 # main() always passes. Optional features (TRACK_THREADS, TRACK_COW, etc.)
 # depend on kernel/BCC version and are tested separately if available.
 REQUIRED_CONFIGS = [
-    ("box64_dynarec.py", [
-        "-DCHURN_THRESHOLD_NS=1000000000ULL",
-        "-DHASH_CAPACITY=524288",
-    ], "dynarec core"),
-
-    ("box64_dynarec.py", [
-        "-DCHURN_THRESHOLD_NS=1000000000ULL",
-        "-DHASH_CAPACITY=524288",
-        "-DFILTER_PID=1234",
-    ], "dynarec with pid filter"),
-
     ("box64_memleak.py", [
         "-DHASH_CAPACITY=524288",
     ], "memleak core"),
@@ -123,12 +112,12 @@ REQUIRED_CONFIGS = [
         "-DFILTER_PID=1234",
     ], "memleak with pid filter"),
 
-    ("box64_steam.py", [
+    ("box64_trace.py", [
         "-DCHURN_THRESHOLD_NS=1000000000ULL",
         "-DHASH_CAPACITY=524288",
     ], "steam core"),
 
-    ("box64_steam.py", [
+    ("box64_trace.py", [
         "-DCHURN_THRESHOLD_NS=1000000000ULL",
         "-DHASH_CAPACITY=524288",
         "-DFILTER_PID=1234",
@@ -139,13 +128,6 @@ REQUIRED_CONFIGS = [
 # These use #ifdef-gated features that may hit LLVM backend limitations
 # on older kernels/BCC versions.
 OPTIONAL_CONFIGS = [
-    ("box64_dynarec.py", [
-        "-DCHURN_THRESHOLD_NS=1000000000ULL",
-        "-DHASH_CAPACITY=524288",
-        "-DTRACK_PROT",
-        "-DTRACK_THREADS",
-        "-DTRACK_COW",
-    ], "dynarec all features"),
 
     ("box64_memleak.py", [
         "-DHASH_CAPACITY=524288",
@@ -156,7 +138,7 @@ OPTIONAL_CONFIGS = [
         "-DTRACK_COW",
     ], "memleak all features"),
 
-    ("box64_steam.py", [
+    ("box64_trace.py", [
         "-DCHURN_THRESHOLD_NS=1000000000ULL",
         "-DHASH_CAPACITY=524288",
         "-DTRACK_MEM",
@@ -168,7 +150,7 @@ OPTIONAL_CONFIGS = [
         "-DTRACK_COW",
     ], "steam all features"),
 
-    ("box64_steam.py", [
+    ("box64_trace.py", [
         "-DCHURN_THRESHOLD_NS=1000000000ULL",
         "-DHASH_CAPACITY=524288",
         "-DTRACK_MEM",

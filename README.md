@@ -5,11 +5,10 @@ internal functions at runtime with minimal overhead and no recompilation.
 
 | Tool | Purpose | Docs |
 |------|---------|------|
-| `box64_dynarec.py` | DynaRec JIT block analysis (churn, lifetimes, protection overhead) | [docs/box64_dynarec.md](docs/box64_dynarec.md) |
 | `box64_memleak.py` | Memory leak detection for Box64's custom allocator | [docs/box64_memleak.md](docs/box64_memleak.md) |
-| `box64_steam.py` | Multi-process Steam tracer (fork/exec, per-PID memory, JIT, mmap, pressure-vessel) | [docs/box64_steam.md](docs/box64_steam.md) |
+| `box64_trace.py` | Multi-process Steam tracer (fork/exec, per-PID memory, JIT, mmap, pressure-vessel, DynaRec JIT block analysis) | [docs/box64_trace.md](docs/box64_trace.md) |
 
-All three tools share [`box64_common.py`](box64_common.py) — 14 helpers for
+Both tools share [`box64_common.py`](box64_common.py) — 14 helpers for
 nm-based symbol validation, `/proc` parsing, BCC/kernel workarounds, CoW
 delta math, thread-parent correlation, and output formatting.
 
@@ -46,14 +45,12 @@ sudo make install
 ### 3. Pick a tool and run
 
 ```bash
-# Analyze JIT block churn and lifetimes
-sudo python3 box64_dynarec.py -p <PID>
-
 # Find memory leaks in Box64's allocator
 sudo python3 box64_memleak.py -p <PID>
 
-# Profile a full Steam gaming session (all box64 processes)
-sudo python3 box64_steam.py
+# Profile a full Steam gaming session (multi-process, includes JIT block
+# churn/lifetime analysis, per-PID memory, fork/exec lifecycle, CoW)
+sudo python3 box64_trace.py
 ```
 
 Common flags: `-b BINARY` (default `/usr/local/bin/box64`), `-p PID` (0=all), `-i INTERVAL` (seconds).
@@ -64,16 +61,15 @@ Press **Ctrl+C** when done to get the full report.
 
 ```
 box64_common.py         ~270 lines  shared helpers (see table below)
-box64_dynarec.py       ~1070 lines  JIT block profiler
 box64_memleak.py       ~1180 lines  custom-allocator leak detector
-box64_steam.py         ~2940 lines  multi-process Steam tracer (superset of dynarec)
+box64_trace.py         ~3000 lines  multi-process Steam tracer (also covers JIT block analysis)
 
-tests/                              311 unit tests + 3 upstream-compat tests
+tests/                              223 unit tests + 3 upstream-compat tests
   conftest.py                       mocks the `bcc` module so tests run without it
-  test_*.py            22 files     fast pure-Python checks (mocks, no root)
+  test_*.py                         fast pure-Python checks (mocks, no root)
   test_ebpf_integration.py          E2E: runs each tool against live box64 workloads
   test_upstream_compat.py           verifies probed symbols & dynablock_t layout vs. box64 source
-  dynarec_stress.c                  stress workload for the JIT probe tests
+  dynarec_stress.c                  stress workload for the JIT probes
   memleak_leaker.c                  deliberately leaks via `_exit(0)` for memleak E2E
   steam_lifecycle.c                 fork/vfork/pthread workload for steam E2E
 
@@ -81,7 +77,7 @@ docs/                               per-tool reference + architecture notes
 ```
 
 `box64_common.py` consolidates every helper that was previously duplicated
-across the three tools:
+across the tools:
 
 | Category | Helpers |
 |---|---|
@@ -93,9 +89,8 @@ across the three tools:
 
 ## Documentation
 
-- **[`docs/box64_dynarec.md`](docs/box64_dynarec.md)** -- Options, output format, required symbols for the DynaRec JIT profiler.
 - **[`docs/box64_memleak.md`](docs/box64_memleak.md)** -- Options, output format, required symbols for the memory leak detector.
-- **[`docs/box64_steam.md`](docs/box64_steam.md)** -- Options, output format, required symbols for the multi-process Steam tracer.
+- **[`docs/box64_trace.md`](docs/box64_trace.md)** -- Options, output format, required symbols for the multi-process Steam tracer.
 - **[`docs/HOW_BOX64_WORKS.md`](docs/HOW_BOX64_WORKS.md)** -- How Box64 executes an x86_64 binary, from ELF loading through DynaRec JIT to syscall translation.
 - **[`docs/BOX64_FORK_EXEC_MEMORY.md`](docs/BOX64_FORK_EXEC_MEMORY.md)** -- Box64's fork/exec/clone mechanisms, custom allocator, DynaRec JIT block management, and pressure-vessel Steam containers.
 - **[`docs/BOX64_STEAM_INTERNALS.md`](docs/BOX64_STEAM_INTERNALS.md)** -- How Box64's pressure-vessel shim works: Steam detection, environment variable translation, D-Bus bypass, multi-process re-invocation model.

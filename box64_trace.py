@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 #
-# box64_steam.py — eBPF/BCC uprobe-based multi-process tracer for Box64 + Steam.
+# box64_trace.py — eBPF/BCC uprobe-based multi-process tracer for Box64 + Steam.
 # Tracks fork/exec/vfork process lifecycle, per-PID memory usage (custom allocator,
 # DynaRec JIT, mmap), context creation/destruction, and pressure-vessel detection
 # across ALL concurrent box64 instances simultaneously.
@@ -9,7 +9,7 @@
 # Requires: root, linux >=4.9, python3-bcc (BCC toolkit)
 #
 # Usage:
-#   sudo python3 box64_steam.py [-b BINARY] [-p PID] [-i INTERVAL] \
+#   sudo python3 box64_trace.py [-b BINARY] [-p PID] [-i INTERVAL] \
 #                               [--no-mem] [--no-dynarec] [--no-mmap] \
 #                               [--no-threads] [--no-cow] [--hash-capacity N]
 
@@ -2027,7 +2027,9 @@ def main():
                         "parent_smaps": smaps,
                         "parent_minflt": minflt,
                         "parent_tid": evt.creator_tid,
-                        "child_samples": [],
+                        # child_pid -> {first: sample, last: sample, count: int}
+                        # Only first+last are kept to bound memory across long runs.
+                        "child_samples": {},
                     }
 
             elif evt.event_type == 4:  # create_request
@@ -2682,6 +2684,12 @@ def main():
                     kids = sorted(children_of.get(tid, []))
                     clones_list = clone_children.get(tid, [])
                     forks_list = [e for e in fork_events if e[1] == tid]
+                    # FIFO match my_fork entry events to sched_process_fork
+                    # tracepoint observations on the same parent_pid.
+                    fork_kids_by_pid = {}
+                    for fe_ts, fe_tid, fe_pid in forks_list:
+                        fork_kids_by_pid.setdefault(
+                            fe_pid, list(proc_children.get(fe_pid, [])))
                     total = len(kids) + len(clones_list) + len(forks_list)
                     idx = 0
                     for child_tid in kids:
@@ -2690,7 +2698,12 @@ def main():
                     for fe_ts, fe_tid, fe_pid in forks_list:
                         idx += 1
                         conn = "\u2514\u2500\u2500 " if idx == total else "\u251c\u2500\u2500 "
-                        print(f"{child_prefix}{conn}fork (child PID unknown)")
+                        kids_q = fork_kids_by_pid.get(fe_pid, [])
+                        if kids_q:
+                            cpid = kids_q.pop(0)
+                            print(f"{child_prefix}{conn}fork \u2192 PID {cpid}")
+                        else:
+                            print(f"{child_prefix}{conn}fork (child PID unknown)")
                     for child_pid in clones_list:
                         idx += 1
                         conn = "\u2514\u2500\u2500 " if idx == total else "\u251c\u2500\u2500 "
@@ -2718,6 +2731,13 @@ def main():
                     print(f"  {tid:>7}  {ac:>10}  {fmt_size(ab):>12s}  {fnc_str}  {pid:>7}")
 
         # -- Section 7: Copy-on-Write analysis --
+        # CoW kprobe counts (per-pid) — read once, used both in the per-child
+        # summary below and in the system-wide table further down.
+        cow_faults_by_pid = {}
+        if track_cow_kprobe:
+            for k, v in b["cow_per_pid"].items():
+                cow_faults_by_pid[k.value] = v.cow_faults
+
         if fork_cow_data:
             print(f"\n  Copy-on-Write Analysis:")
             for parent_pid, cow_info in fork_cow_data.items():
@@ -2726,22 +2746,70 @@ def main():
                 print(f"      Rss: {fmt_size(ps.get('Rss', 0)):>10}   "
                       f"Private_Dirty: {fmt_size(ps.get('Private_Dirty', 0)):>10}   "
                       f"Minor faults: {cow_info['parent_minflt']}")
-                for sample in cow_info["child_samples"]:
-                    cs = sample["smaps"]
-                    elapsed = sample["time"] - cow_info["snapshot_time"]
-                    delta_dirty, delta_minflt = compute_cow_deltas(
+
+                children = cow_info["child_samples"]
+                if not children:
+                    print("      (no child snapshots collected)")
+                    continue
+
+                rows = []
+                for cpid, info in children.items():
+                    last = info["last"]
+                    cur_dirty, cur_minflt = compute_cow_deltas(
                         ps, cow_info["parent_minflt"],
-                        cs, sample["minflt"])
-                    print(f"    Child PID {sample['pid']} (after {elapsed:.1f}s):")
-                    print(f"      Private_Dirty: {fmt_size(cs.get('Private_Dirty', 0)):>10}"
-                          f"  (+{fmt_size(delta_dirty)} CoW)")
-                    print(f"      Minor faults:  {sample['minflt']:>10}"
-                          f"  (+{delta_minflt})")
+                        last["smaps"], last["minflt"])
+                    age = last["time"] - cow_info["snapshot_time"]
+                    cow_faults = cow_faults_by_pid.get(cpid, 0)
+                    rows.append((cpid, age, info["count"],
+                                 last["smaps"].get("Private_Dirty", 0),
+                                 cur_dirty, last["minflt"], cur_minflt,
+                                 cow_faults))
+                sort_idx = 7 if track_cow_kprobe else 6
+                rows.sort(key=lambda r: r[sort_idx], reverse=True)
+
+                n = len(rows)
+                cow_min, cow_max = min(r[4] for r in rows), max(r[4] for r in rows)
+                mf_min, mf_max = min(r[6] for r in rows), max(r[6] for r in rows)
+                summary = (f"      {n} children: +CoW {fmt_size(cow_min)}..{fmt_size(cow_max)}, "
+                           f"+minflt {mf_min:,}..{mf_max:,}")
+                if track_cow_kprobe:
+                    cf_min = min(r[7] for r in rows)
+                    cf_max = max(r[7] for r in rows)
+                    summary += f", CoW faults {cf_min:,}..{cf_max:,}"
+                print(summary)
+
+                print()
+                if track_cow_kprobe:
+                    print(f"      {'PID':>7}  {'Age':>7}  {'N':>3}  "
+                          f"{'Priv_Dirty':>10}  {'+CoW':>10}  "
+                          f"{'MinFlt':>11}  {'+MinFlt':>11}  {'CoW_Faults':>10}")
+                    print(f"      {'-'*7}  {'-'*7}  {'-'*3}  "
+                          f"{'-'*10}  {'-'*10}  {'-'*11}  {'-'*11}  {'-'*10}")
+                    for cpid, age, count, priv, cow, mflt, dmflt, cf in rows:
+                        print(f"      {cpid:>7}  {age:>6.1f}s  {count:>3}  "
+                              f"{fmt_size(priv):>10}  {fmt_size(cow):>10}  "
+                              f"{mflt:>11,}  {dmflt:>11,}  {cf:>10,}")
+                else:
+                    print(f"      {'PID':>7}  {'Age':>7}  {'N':>3}  "
+                          f"{'Priv_Dirty':>10}  {'+CoW':>10}  "
+                          f"{'MinFlt':>11}  {'+MinFlt':>11}")
+                    print(f"      {'-'*7}  {'-'*7}  {'-'*3}  "
+                          f"{'-'*10}  {'-'*10}  {'-'*11}  {'-'*11}")
+                    for cpid, age, count, priv, cow, mflt, dmflt, _cf in rows:
+                        print(f"      {cpid:>7}  {age:>6.1f}s  {count:>3}  "
+                              f"{fmt_size(priv):>10}  {fmt_size(cow):>10}  "
+                              f"{mflt:>11,}  {dmflt:>11,}")
 
         if track_cow_kprobe:
-            cow_table = b["cow_per_pid"]
-            cow_items = [(k.value, v.cow_faults) for k, v in cow_table.items()]
+            cow_items = list(cow_faults_by_pid.items())
             tracked_pids = set(known_pids) | set(pid_labels.keys())
+            # Include forked children (from sched_process_fork tracepoint)
+            # and clone children (from clone_return) so they aren't filtered
+            # out of the system-wide CoW Page Faults table.
+            for kids in proc_children.values():
+                tracked_pids.update(kids)
+            for kids in process_children.values():
+                tracked_pids.update(kids)
             if args.pid:
                 tracked_pids.add(args.pid)
             if tracked_pids:
@@ -2914,16 +2982,25 @@ def main():
             last_print = time.monotonic()
             # PC sampling interval diff
             profile_interval()
-            # CoW child sampling
+            # CoW child sampling — iterate both fork children (from
+            # sched_process_fork tracepoint) and clone children (from
+            # clone_return uprobe). Only first+last per child are kept.
             for parent_pid, cow_info in fork_cow_data.items():
-                for child_pid in process_children.get(parent_pid, []):
+                child_pids = (set(proc_children.get(parent_pid, []))
+                              | set(process_children.get(parent_pid, [])))
+                for child_pid in child_pids:
                     smaps = read_smaps_rollup(child_pid)
                     minflt = read_minflt(child_pid)
-                    if smaps:
-                        cow_info["child_samples"].append({
-                            "time": time.monotonic(), "pid": child_pid,
-                            "smaps": smaps, "minflt": minflt,
-                        })
+                    if not smaps:
+                        continue
+                    sample = {"time": time.monotonic(), "smaps": smaps, "minflt": minflt}
+                    cs = cow_info["child_samples"]
+                    entry = cs.get(child_pid)
+                    if entry is None:
+                        cs[child_pid] = {"first": sample, "last": sample, "count": 1}
+                    else:
+                        entry["last"] = sample
+                        entry["count"] += 1
 
     vals = read_stats()
     print_final_report(vals)

@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS = ["box64_dynarec.py", "box64_memleak.py", "box64_steam.py"]
+SCRIPTS = ["box64_memleak.py", "box64_trace.py"]
 
 # Value-only defines: always passed in cflags but never #ifdef-guarded.
 # HASH_CAPACITY and CHURN_THRESHOLD_NS are used as numeric values in BPF C.

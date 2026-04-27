@@ -1,16 +1,15 @@
 """Tests for parse_args() in all three tools."""
 import pytest
 
-import box64_dynarec
 import box64_memleak
-import box64_steam
+import box64_trace
 
 
 # ---------------------------------------------------------------------------
 # Shared defaults
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("module", [box64_dynarec, box64_memleak, box64_steam])
+@pytest.mark.parametrize("module", [box64_memleak, box64_trace])
 class TestSharedDefaults:
     def test_default_binary(self, module, monkeypatch):
         monkeypatch.setattr("sys.argv", ["prog"])
@@ -41,32 +40,6 @@ class TestSharedDefaults:
         monkeypatch.setattr("sys.argv", ["prog", "-i", "5"])
         args = module.parse_args()
         assert args.interval == 5
-
-
-# ---------------------------------------------------------------------------
-# box64_dynarec-specific flags
-# ---------------------------------------------------------------------------
-
-class TestDynarecArgs:
-    def test_no_prot_default(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["prog"])
-        args = box64_dynarec.parse_args()
-        assert args.no_prot is False
-
-    def test_no_prot_set(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["prog", "--no-prot"])
-        args = box64_dynarec.parse_args()
-        assert args.no_prot is True
-
-    def test_churn_threshold_default(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["prog"])
-        args = box64_dynarec.parse_args()
-        assert args.churn_threshold == 1.0
-
-    def test_churn_threshold_custom(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["prog", "--churn-threshold", "2.5"])
-        args = box64_dynarec.parse_args()
-        assert args.churn_threshold == 2.5
 
 
 # ---------------------------------------------------------------------------
@@ -101,36 +74,36 @@ class TestMemleakArgs:
 
 
 # ---------------------------------------------------------------------------
-# box64_steam-specific flags
+# box64_trace-specific flags
 # ---------------------------------------------------------------------------
 
 class TestSteamArgs:
     def test_no_mem_default(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["prog"])
-        args = box64_steam.parse_args()
+        args = box64_trace.parse_args()
         assert args.no_mem is False
 
     def test_no_dynarec_default(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["prog"])
-        args = box64_steam.parse_args()
+        args = box64_trace.parse_args()
         assert args.no_dynarec is False
 
     def test_no_mmap_default(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["prog"])
-        args = box64_steam.parse_args()
+        args = box64_trace.parse_args()
         assert args.no_mmap is False
 
     def test_sample_freq_default(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["prog"])
-        args = box64_steam.parse_args()
+        args = box64_trace.parse_args()
         assert args.sample_freq == 0
 
     def test_sample_freq_custom(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["prog", "--sample-freq", "4999"])
-        args = box64_steam.parse_args()
+        args = box64_trace.parse_args()
         assert args.sample_freq == 4999
 
     def test_hash_capacity_default(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["prog"])
-        args = box64_steam.parse_args()
+        args = box64_trace.parse_args()
         assert args.hash_capacity == 524288

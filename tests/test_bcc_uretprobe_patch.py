@@ -4,14 +4,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import box64_steam
-import box64_dynarec
+import box64_trace
 import box64_memleak
 
 ALL_MODULES = [
-    pytest.param(box64_dynarec, id="box64_dynarec"),
     pytest.param(box64_memleak, id="box64_memleak"),
-    pytest.param(box64_steam, id="box64_steam"),
+    pytest.param(box64_trace, id="box64_trace"),
 ]
 
 
@@ -87,7 +85,7 @@ class TestPatchImportFailure:
             del bcc.libbcc
             _sys.modules.pop("bcc.libbcc", None)
             # Should not raise
-            box64_steam._patch_bcc_uretprobe()
+            box64_trace._patch_bcc_uretprobe()
         finally:
             bcc.libbcc = orig_attr
             if orig_mod is not None:

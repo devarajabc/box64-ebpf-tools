@@ -1,9 +1,9 @@
-"""Tests for _read_block_from_fd() struct decoding (box64_steam only)."""
+"""Tests for _read_block_from_fd() struct decoding (box64_trace only)."""
 import io
 import struct
 import pytest
 
-import box64_steam
+import box64_trace
 
 
 def _build_dynablock(block=0x1000, x64_addr=0x400000, x64_size=128,
@@ -50,7 +50,7 @@ class TestReadBlockFromFd:
         db_ptr = 0x200
         f = _build_mem(alloc_addr, db_ptr, db_data)
 
-        result = box64_steam._read_block_from_fd(f, alloc_addr)
+        result = box64_trace._read_block_from_fd(f, alloc_addr)
 
         assert result is not None
         assert result["block"] == 0x1000
@@ -63,13 +63,13 @@ class TestReadBlockFromFd:
         # actual_block_addr points to a null pointer (all zeros)
         buf = bytearray(0x100)
         f = io.BytesIO(bytes(buf))
-        result = box64_steam._read_block_from_fd(f, 0)
+        result = box64_trace._read_block_from_fd(f, 0)
         assert result is None
 
     def test_truncated_pointer_returns_none(self):
         # Only 4 bytes available when 8 are needed
         f = io.BytesIO(b"\x01\x00\x00\x00")
-        result = box64_steam._read_block_from_fd(f, 0)
+        result = box64_trace._read_block_from_fd(f, 0)
         assert result is None
 
     def test_truncated_struct_returns_none(self):
@@ -79,5 +79,5 @@ class TestReadBlockFromFd:
         buf = bytearray(db_ptr + 0x10)  # only 0x10 bytes of struct (need 0x58)
         struct.pack_into("<Q", buf, alloc_addr, db_ptr)
         f = io.BytesIO(bytes(buf))
-        result = box64_steam._read_block_from_fd(f, alloc_addr)
+        result = box64_trace._read_block_from_fd(f, alloc_addr)
         assert result is None

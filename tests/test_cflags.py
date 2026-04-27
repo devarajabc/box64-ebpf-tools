@@ -6,9 +6,8 @@ passed to BPF(text=..., cflags=...).
 """
 import pytest
 
-import box64_dynarec
 import box64_memleak
-import box64_steam
+import box64_trace
 
 
 class _CflagsCapture(BaseException):
@@ -38,10 +37,6 @@ def _setup_mocks(monkeypatch, module, argv):
     # Only dynarec and steam have these
     if hasattr(module, "_bcc_has_atomic_increment"):
         monkeypatch.setattr(module, "_bcc_has_atomic_increment", lambda: True)
-
-    # dynarec-specific
-    if hasattr(module, "check_dynarec_symbols"):
-        monkeypatch.setattr(module, "check_dynarec_symbols", lambda *a, **kw: None)
 
     # Mock BPF to capture cflags and stop execution
     captured = {}
@@ -77,49 +72,6 @@ def _cflag_value(cflags, name):
         if f.startswith(f"-D{name}="):
             return f.split("=", 1)[1]
     return None
-
-
-# ---------------------------------------------------------------------------
-# box64_dynarec
-# ---------------------------------------------------------------------------
-
-class TestDynarecCflags:
-    def test_defaults(self, monkeypatch):
-        cflags = _run_main(box64_dynarec, monkeypatch, [])
-        names = _cflag_names(cflags)
-        assert "CHURN_THRESHOLD_NS" in names
-        assert "HASH_CAPACITY" in names
-        assert "TRACK_PROT" in names
-        assert "TRACK_THREADS" in names
-        assert "TRACK_COW" in names
-        assert "FILTER_PID" not in names
-
-    def test_no_prot(self, monkeypatch):
-        cflags = _run_main(box64_dynarec, monkeypatch, ["--no-prot"])
-        assert "TRACK_PROT" not in _cflag_names(cflags)
-
-    def test_no_threads(self, monkeypatch):
-        cflags = _run_main(box64_dynarec, monkeypatch, ["--no-threads"])
-        assert "TRACK_THREADS" not in _cflag_names(cflags)
-
-    def test_no_cow(self, monkeypatch):
-        cflags = _run_main(box64_dynarec, monkeypatch, ["--no-cow"])
-        assert "TRACK_COW" not in _cflag_names(cflags)
-
-    def test_pid_filter(self, monkeypatch):
-        cflags = _run_main(box64_dynarec, monkeypatch, ["-p", "1234"])
-        names = _cflag_names(cflags)
-        assert "FILTER_PID" in names
-        assert _cflag_value(cflags, "FILTER_PID") == "1234"
-
-    def test_churn_threshold(self, monkeypatch):
-        cflags = _run_main(box64_dynarec, monkeypatch, ["--churn-threshold", "2.5"])
-        val = _cflag_value(cflags, "CHURN_THRESHOLD_NS")
-        assert val == "2500000000ULL"
-
-    def test_hash_capacity(self, monkeypatch):
-        cflags = _run_main(box64_dynarec, monkeypatch, ["--hash-capacity", "1000000"])
-        assert _cflag_value(cflags, "HASH_CAPACITY") == "1000000"
 
 
 # ---------------------------------------------------------------------------
@@ -171,12 +123,12 @@ class TestMemleakCflags:
 
 
 # ---------------------------------------------------------------------------
-# box64_steam
+# box64_trace
 # ---------------------------------------------------------------------------
 
 class TestSteamCflags:
     def test_defaults(self, monkeypatch):
-        cflags = _run_main(box64_steam, monkeypatch, [])
+        cflags = _run_main(box64_trace, monkeypatch, [])
         names = _cflag_names(cflags)
         assert "HASH_CAPACITY" in names
         assert "CHURN_THRESHOLD_NS" in names
@@ -192,11 +144,11 @@ class TestSteamCflags:
         assert "TRACK_PROFILE" not in names
 
     def test_no_mem(self, monkeypatch):
-        cflags = _run_main(box64_steam, monkeypatch, ["--no-mem"])
+        cflags = _run_main(box64_trace, monkeypatch, ["--no-mem"])
         assert "TRACK_MEM" not in _cflag_names(cflags)
 
     def test_no_dynarec(self, monkeypatch):
-        cflags = _run_main(box64_steam, monkeypatch, ["--no-dynarec"])
+        cflags = _run_main(box64_trace, monkeypatch, ["--no-dynarec"])
         names = _cflag_names(cflags)
         assert "TRACK_DYNAREC" not in names
         # prot and block detail depend on dynarec
@@ -204,42 +156,42 @@ class TestSteamCflags:
         assert "TRACK_BLOCK_DETAIL" not in names
 
     def test_no_mmap(self, monkeypatch):
-        cflags = _run_main(box64_steam, monkeypatch, ["--no-mmap"])
+        cflags = _run_main(box64_trace, monkeypatch, ["--no-mmap"])
         assert "TRACK_MMAP" not in _cflag_names(cflags)
 
     def test_no_threads(self, monkeypatch):
-        cflags = _run_main(box64_steam, monkeypatch, ["--no-threads"])
+        cflags = _run_main(box64_trace, monkeypatch, ["--no-threads"])
         assert "TRACK_THREADS" not in _cflag_names(cflags)
 
     def test_no_cow(self, monkeypatch):
-        cflags = _run_main(box64_steam, monkeypatch, ["--no-cow"])
+        cflags = _run_main(box64_trace, monkeypatch, ["--no-cow"])
         assert "TRACK_COW" not in _cflag_names(cflags)
 
     def test_no_prot(self, monkeypatch):
-        cflags = _run_main(box64_steam, monkeypatch, ["--no-prot"])
+        cflags = _run_main(box64_trace, monkeypatch, ["--no-prot"])
         assert "TRACK_PROT" not in _cflag_names(cflags)
 
     def test_no_block_detail(self, monkeypatch):
-        cflags = _run_main(box64_steam, monkeypatch, ["--no-block-detail"])
+        cflags = _run_main(box64_trace, monkeypatch, ["--no-block-detail"])
         assert "TRACK_BLOCK_DETAIL" not in _cflag_names(cflags)
 
     def test_pid_filter(self, monkeypatch):
-        cflags = _run_main(box64_steam, monkeypatch, ["-p", "9999"])
+        cflags = _run_main(box64_trace, monkeypatch, ["-p", "9999"])
         names = _cflag_names(cflags)
         assert "FILTER_PID" in names
         assert _cflag_value(cflags, "FILTER_PID") == "9999"
 
     def test_sample_freq(self, monkeypatch):
-        cflags = _run_main(box64_steam, monkeypatch, ["--sample-freq", "4999"])
+        cflags = _run_main(box64_trace, monkeypatch, ["--sample-freq", "4999"])
         names = _cflag_names(cflags)
         assert "TRACK_PROFILE" in names
         assert "PROFILE_CAPACITY" in names
 
     def test_churn_threshold(self, monkeypatch):
-        cflags = _run_main(box64_steam, monkeypatch, ["--churn-threshold", "0.5"])
+        cflags = _run_main(box64_trace, monkeypatch, ["--churn-threshold", "0.5"])
         val = _cflag_value(cflags, "CHURN_THRESHOLD_NS")
         assert val == "500000000ULL"
 
     def test_hash_capacity(self, monkeypatch):
-        cflags = _run_main(box64_steam, monkeypatch, ["--hash-capacity", "131072"])
+        cflags = _run_main(box64_trace, monkeypatch, ["--hash-capacity", "131072"])
         assert _cflag_value(cflags, "HASH_CAPACITY") == "131072"

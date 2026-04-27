@@ -189,135 +189,6 @@ def parse_fmt_size(s):
     return 0
 
 
-def check_dynarec(box64_bin, test_bins):
-    """Test box64_dynarec.py against live Box64 processes."""
-    print("\n--- box64_dynarec.py ---")
-
-    stdout, stderr, rc, _bin_results = run_tool_test(
-        "box64_dynarec.py",
-        ["-i", "1"],
-        box64_bin, test_bins,
-    )
-
-    combined = stdout + "\n" + stderr
-    errors = []
-
-    if not check_no_tracebacks(combined, "dynarec"):
-        errors.append("Python traceback detected")
-
-    # Print tool startup info for debugging
-    for line in stdout.splitlines():
-        if line.startswith("[*]") or line.startswith("WARNING"):
-            print(f"  TOOL  {line}")
-
-    if "FINAL REPORT" not in stdout:
-        errors.append("FINAL REPORT not found in output")
-        print(f"  FAIL  dynarec: FINAL REPORT not found")
-        print(f"  stdout ({len(stdout)} chars): {stdout[:500]}")
-        print(f"  stderr ({len(stderr)} chars): {stderr[:500]}")
-        return False, errors
-
-    # AllocDynarecMap count > 0
-    m = re.search(r"AllocDynarecMap:\s+(\d+)", stdout)
-    if m:
-        count = int(m.group(1))
-        if count > 0:
-            print(f"  PASS  AllocDynarecMap: {count}")
-        else:
-            errors.append("AllocDynarecMap count is 0")
-            print(f"  FAIL  AllocDynarecMap count is 0")
-    else:
-        errors.append("AllocDynarecMap line not found")
-        print(f"  FAIL  AllocDynarecMap line not found")
-
-    # Bytes allocated > 0
-    m = re.search(r"Bytes allocated:\s+(.+)", stdout)
-    if m:
-        val = m.group(1).strip()
-        if is_zero_size(val):
-            errors.append("Bytes allocated is 0")
-            print(f"  FAIL  Bytes allocated is 0")
-        else:
-            print(f"  PASS  Bytes allocated: {val}")
-    else:
-        errors.append("Bytes allocated line not found")
-        print(f"  FAIL  Bytes allocated line not found")
-
-    # Bytes allocated sanity range [1 KB, 1 GB]
-    m_bytes = re.search(r"Bytes allocated:\s+(.+)", stdout)
-    if m_bytes:
-        alloc_bytes = parse_fmt_size(m_bytes.group(1).strip())
-        if 1024 <= alloc_bytes <= 1024**3:
-            print(f"  PASS  Bytes allocated in sane range: {m_bytes.group(1).strip()} ({alloc_bytes} bytes)")
-        else:
-            errors.append(f"Bytes allocated out of range: {alloc_bytes}")
-            print(f"  FAIL  Bytes allocated out of range: {alloc_bytes}")
-
-    # FreeDynarecMap <= AllocDynarecMap
-    m_alloc = re.search(r"AllocDynarecMap:\s+(\d+)", stdout)
-    m_free = re.search(r"FreeDynarecMap:\s+(\d+)", stdout)
-    if m_alloc and m_free:
-        alloc_count = int(m_alloc.group(1))
-        free_count = int(m_free.group(1))
-        if free_count <= alloc_count:
-            print(f"  PASS  FreeDynarecMap ({free_count}) <= AllocDynarecMap ({alloc_count})")
-        else:
-            errors.append(f"FreeDynarecMap ({free_count}) > AllocDynarecMap ({alloc_count})")
-            print(f"  FAIL  FreeDynarecMap ({free_count}) > AllocDynarecMap ({alloc_count})")
-    elif m_free:
-        print(f"  INFO  FreeDynarecMap: {m_free.group(1)}")
-
-    # Outstanding <= Bytes allocated
-    m_outstanding = re.search(r"Outstanding:\s+(.+)", stdout)
-    if m_outstanding and m_bytes:
-        outstanding_bytes = parse_fmt_size(m_outstanding.group(1).strip())
-        alloc_total = parse_fmt_size(m_bytes.group(1).strip())
-        if outstanding_bytes <= alloc_total:
-            print(f"  PASS  Outstanding ({outstanding_bytes}) <= Bytes allocated ({alloc_total})")
-        else:
-            errors.append(f"Outstanding ({outstanding_bytes}) > Bytes allocated ({alloc_total})")
-            print(f"  FAIL  Outstanding ({outstanding_bytes}) > Bytes allocated ({alloc_total})")
-
-    # Allocation size distribution section with histogram lines
-    if "Allocation size distribution:" in stdout:
-        # Histogram lines contain bracketed ranges like "[64, 128)"
-        hist_lines = re.findall(r"\[[\d,\s]+\).*\|", stdout)
-        if hist_lines:
-            print(f"  PASS  Allocation size distribution: {len(hist_lines)} histogram lines")
-        else:
-            print(f"  INFO  Allocation size distribution present but no histogram lines")
-    else:
-        print(f"  INFO  Allocation size distribution section not found")
-
-    # Block lifetime distribution section with histogram lines
-    if "Block lifetime distribution:" in stdout:
-        hist_lines = re.findall(r"\[[\d,\s]+\).*\|", stdout)
-        if hist_lines:
-            print(f"  PASS  Block lifetime distribution: {len(hist_lines)} histogram lines")
-        else:
-            print(f"  INFO  Block lifetime distribution present but no histogram lines")
-    else:
-        print(f"  INFO  Block lifetime distribution section not found")
-
-    # Protection tracking (default-on)
-    m = re.search(r"protectDB:\s+(\d+)\s+calls", stdout)
-    if m:
-        print(f"  INFO  protectDB: {m.group(1)} calls")
-    else:
-        print(f"  INFO  protectDB not found (symbols may be absent)")
-
-    ok = len(errors) == 0
-    if ok:
-        print(f"  PASS  box64_dynarec.py (all assertions passed)")
-    else:
-        # Dump stderr for debugging probe attachment issues
-        if stderr.strip():
-            print(f"  DEBUG stderr ({len(stderr)} chars):")
-            for line in stderr.strip().splitlines()[:30]:
-                print(f"         {line}")
-    return ok, errors
-
-
 def check_memleak(box64_bin, test_bins):
     """Test box64_memleak.py against live Box64 processes."""
     print("\n--- box64_memleak.py ---")
@@ -516,11 +387,11 @@ def check_memleak_leaker(box64_bin, leaker_bin):
 
 
 def check_steam(box64_bin, test_bins):
-    """Test box64_steam.py against live Box64 processes with multi-process workload."""
-    print("\n--- box64_steam.py ---")
+    """Test box64_trace.py against live Box64 processes with multi-process workload."""
+    print("\n--- box64_trace.py ---")
 
     stdout, stderr, rc, _bin_results = run_tool_test(
-        "box64_steam.py",
+        "box64_trace.py",
         ["-i", "2"],
         box64_bin, test_bins,
         ready_timeout=40,
@@ -718,7 +589,7 @@ def check_steam(box64_bin, test_bins):
 
     ok = len(errors) == 0
     if ok:
-        print(f"  PASS  box64_steam.py (all assertions passed)")
+        print(f"  PASS  box64_trace.py (all assertions passed)")
     else:
         if stderr.strip():
             print(f"  DEBUG stderr ({len(stderr)} chars):")
@@ -728,11 +599,11 @@ def check_steam(box64_bin, test_bins):
 
 
 def check_steam_sampling(box64_bin, test_bins):
-    """Test box64_steam.py with PC sampling (--sample-freq) enabled."""
-    print("\n--- box64_steam.py (PC sampling) ---")
+    """Test box64_trace.py with PC sampling (--sample-freq) enabled."""
+    print("\n--- box64_trace.py (PC sampling) ---")
 
     stdout, stderr, rc, _bin_results = run_tool_test(
-        "box64_steam.py",
+        "box64_trace.py",
         ["-i", "2", "--sample-freq", "4999"],
         box64_bin, test_bins,
         ready_timeout=40,
@@ -802,7 +673,7 @@ def check_steam_sampling(box64_bin, test_bins):
 
     ok = len(errors) == 0
     if ok:
-        print(f"  PASS  box64_steam.py PC sampling (all assertions passed)")
+        print(f"  PASS  box64_trace.py PC sampling (all assertions passed)")
     else:
         if stderr.strip():
             print(f"  DEBUG stderr ({len(stderr)} chars):")
@@ -838,9 +709,11 @@ def check_output_correctness(box64_bin, test_bins, test_dir):
         print("  SKIP  No ref files found")
         return True, []
 
-    # Run with probes attached and correct per-test arguments
+    # Run with probes attached and correct per-test arguments.
+    # box64_trace.py attaches a superset of dynarec's probes, so this
+    # exercises non-perturbation against the broadest probe set.
     stdout, stderr, rc, bin_results = run_tool_test(
-        "box64_dynarec.py", ["-i", "1"],
+        "box64_trace.py", ["-i", "1"],
         box64_bin, test_bins,
         test_args=TEST_ARGS,
     )
@@ -952,13 +825,6 @@ def main():
     failed = 0
     errors = []
 
-    ok, errs = check_dynarec(args.box64, test_bins)
-    if ok:
-        passed += 1
-    else:
-        failed += 1
-        errors.extend(errs)
-
     ok, errs = check_memleak(args.box64, test_bins)
     if ok:
         passed += 1
@@ -1024,8 +890,8 @@ def main():
             failed += 1
             errors.extend(errs)
     else:
-        print("\n  SKIP  box64_steam.py: steam_lifecycle binary not found")
-        print("  SKIP  box64_steam.py (PC sampling): steam_lifecycle binary not found")
+        print("\n  SKIP  box64_trace.py: steam_lifecycle binary not found")
+        print("  SKIP  box64_trace.py (PC sampling): steam_lifecycle binary not found")
 
     # Summary
     print(f"\n{'=' * 60}")

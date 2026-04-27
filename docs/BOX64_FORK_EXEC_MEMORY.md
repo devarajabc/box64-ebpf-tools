@@ -20,7 +20,7 @@ file paths and line numbers.
 10. [Memory: Context and Stack](#10-memory-context-and-stack)
 11. [Memory: Protection System](#11-memory-protection-system)
 12. [Pressure-Vessel Steam Container](#12-pressure-vessel-steam-container)
-13. [Tracing with box64_steam.py](#13-tracing-with-box64_steampy)
+13. [Tracing with box64_trace.py](#13-tracing-with-box64_tracepy)
 
 ---
 
@@ -794,22 +794,22 @@ and container isolation is less critical.
 
 ---
 
-## 13. Tracing with box64_steam.py
+## 13. Tracing with box64_trace.py
 
-The `tools/ebpf/box64_steam.py` eBPF tool traces all of the functions described
+The `tools/ebpf/box64_trace.py` eBPF tool traces all of the functions described
 in this document across multiple concurrent box64 processes.
 
 ### Quick Start
 
 ```bash
 # Trace all box64 processes during a Steam session
-sudo python3 tools/ebpf/box64_steam.py
+sudo python3 tools/ebpf/box64_trace.py
 
 # Custom binary path, 5-second interval
-sudo python3 tools/ebpf/box64_steam.py -b ~/box64/build/box64 -i 5
+sudo python3 tools/ebpf/box64_trace.py -b ~/box64/build/box64 -i 5
 
 # Focus on fork/exec lifecycle only (minimal overhead)
-sudo python3 tools/ebpf/box64_steam.py --no-mem --no-dynarec --no-mmap
+sudo python3 tools/ebpf/box64_trace.py --no-mem --no-dynarec --no-mmap
 ```
 
 ### What It Traces

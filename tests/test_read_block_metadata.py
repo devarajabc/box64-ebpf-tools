@@ -1,10 +1,10 @@
-"""Tests for read_block_metadata() — box64_steam only."""
+"""Tests for read_block_metadata() — box64_trace only."""
 import io
 import struct
 
 import pytest
 
-import box64_steam
+import box64_trace
 
 
 def _build_proc_mem(db_ptr, db_data, alloc_addr=0x1000):
@@ -56,7 +56,7 @@ class TestReadBlockMetadata:
 
         monkeypatch.setattr("builtins.open",
                             lambda *a, **kw: io.BytesIO(mem))
-        result = box64_steam.read_block_metadata(1234, alloc_addr)
+        result = box64_trace.read_block_metadata(1234, alloc_addr)
 
         assert result is not None
         assert result["tick"] == 42
@@ -80,7 +80,7 @@ class TestReadBlockMetadata:
 
         monkeypatch.setattr("builtins.open",
                             lambda *a, **kw: io.BytesIO(bytes(buf)))
-        assert box64_steam.read_block_metadata(1, alloc_addr) is None
+        assert box64_trace.read_block_metadata(1, alloc_addr) is None
 
     def test_truncated_data_returns_none(self, monkeypatch):
         """If struct data is too short, return None."""
@@ -92,14 +92,14 @@ class TestReadBlockMetadata:
 
         monkeypatch.setattr("builtins.open",
                             lambda *a, **kw: io.BytesIO(bytes(buf)))
-        assert box64_steam.read_block_metadata(1, alloc_addr) is None
+        assert box64_trace.read_block_metadata(1, alloc_addr) is None
 
     def test_oserror_returns_none(self, monkeypatch):
         """If /proc/PID/mem can't be opened, return None."""
         def raise_oserror(*a, **kw):
             raise OSError("No such process")
         monkeypatch.setattr("builtins.open", raise_oserror)
-        assert box64_steam.read_block_metadata(99999, 0x1000) is None
+        assert box64_trace.read_block_metadata(99999, 0x1000) is None
 
     def test_always_test_mask(self, monkeypatch):
         """always_test should only use lower 2 bits of flags_byte."""
@@ -110,7 +110,7 @@ class TestReadBlockMetadata:
 
         monkeypatch.setattr("builtins.open",
                             lambda *a, **kw: io.BytesIO(mem))
-        result = box64_steam.read_block_metadata(1, alloc_addr)
+        result = box64_trace.read_block_metadata(1, alloc_addr)
         assert result["always_test"] == 3  # 0xFF & 0x3
 
     def test_negative_isize(self, monkeypatch):
@@ -122,7 +122,7 @@ class TestReadBlockMetadata:
 
         monkeypatch.setattr("builtins.open",
                             lambda *a, **kw: io.BytesIO(mem))
-        result = box64_steam.read_block_metadata(1, alloc_addr)
+        result = box64_trace.read_block_metadata(1, alloc_addr)
         assert result["isize"] == -1
 
     def test_zero_fields(self, monkeypatch):
@@ -137,6 +137,6 @@ class TestReadBlockMetadata:
 
         monkeypatch.setattr("builtins.open",
                             lambda *a, **kw: io.BytesIO(mem))
-        result = box64_steam.read_block_metadata(1, alloc_addr)
+        result = box64_trace.read_block_metadata(1, alloc_addr)
         assert result is not None
         assert all(result[k] == 0 for k in result)

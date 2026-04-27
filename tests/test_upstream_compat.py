@@ -14,7 +14,7 @@ import pytest
 # ---------------------------------------------------------------------------
 # Scripts that contain our uprobe attachments
 # ---------------------------------------------------------------------------
-SCRIPTS = ["box64_dynarec.py", "box64_memleak.py", "box64_steam.py"]
+SCRIPTS = ["box64_memleak.py", "box64_trace.py"]
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -265,7 +265,7 @@ def test_all_probed_symbols_exist_in_upstream(box64_src_dir):
 # ---------------------------------------------------------------------------
 # Test B: dynablock_t struct offsets match our hardcoded values
 # ---------------------------------------------------------------------------
-# Offsets hardcoded in box64_steam.py (BPF reads + Python struct.unpack_from)
+# Offsets hardcoded in box64_trace.py (BPF reads + Python struct.unpack_from)
 EXPECTED_OFFSETS = {
     "block": 0x00,
     "actual_block": 0x08,
@@ -308,7 +308,7 @@ def test_dynablock_struct_offsets(box64_src_dir):
         pytest.fail(
             "dynablock_t struct layout has changed — our hardcoded offsets are stale:\n"
             + "\n".join(mismatches)
-            + "\n\nUpdate offsets in box64_steam.py (BPF + Python) to match."
+            + "\n\nUpdate offsets in box64_trace.py (BPF + Python) to match."
         )
 
 

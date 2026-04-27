@@ -4,16 +4,15 @@ import shutil
 
 import pytest
 
-import box64_dynarec
 import box64_memleak
-import box64_steam
+import box64_trace
 
 
-MODULES = [box64_dynarec, box64_memleak, box64_steam]
+MODULES = [box64_memleak, box64_trace]
 
 
 @pytest.mark.parametrize("module", MODULES,
-                         ids=["dynarec", "memleak", "steam"])
+                         ids=["memleak", "steam"])
 class TestClearStaleUprobes:
     def test_no_crash_with_nonexistent_binary(self, module):
         """Should not crash even when binary doesn't exist."""

@@ -17,7 +17,7 @@ _libbcc.lib = MagicMock()
 _bcc.libbcc = _libbcc
 sys.modules["bcc.libbcc"] = _libbcc
 
-# Add repo root to sys.path so `import box64_dynarec` etc. work
+# Add repo root to sys.path so `import box64_trace` etc. work
 from pathlib import Path
 
 repo_root = str(Path(__file__).resolve().parent.parent)

@@ -1,11 +1,11 @@
-# box64_steam.py
+# box64_trace.py
 
 Traces Box64's behavior across **all concurrent box64 processes** during a Steam
 gaming session. Tracks fork/exec/vfork process lifecycle, per-PID memory usage
 (custom allocator, DynaRec JIT with churn/lifetime/protection analysis, mmap),
 context creation/destruction, and pressure-vessel container detection. Designed
 for understanding memory behavior when Steam spawns 5-10+ concurrent box64
-instances. Subsumes all functionality previously in `box64_dynarec.py`.
+instances.
 
 See also: [`BOX64_FORK_EXEC_MEMORY.md`](BOX64_FORK_EXEC_MEMORY.md) for detailed
 documentation on how fork/exec/memory functions work in box64.
@@ -13,7 +13,7 @@ documentation on how fork/exec/memory functions work in box64.
 ## Usage
 
 ```bash
-sudo python3 box64_steam.py [options]
+sudo python3 box64_trace.py [options]
 ```
 
 ## Options
@@ -38,19 +38,19 @@ sudo python3 box64_steam.py [options]
 
 ```bash
 # Trace all box64 processes (typical Steam session)
-sudo python3 box64_steam.py
+sudo python3 box64_trace.py
 
 # Trace with custom binary path and 5-second summaries
-sudo python3 box64_steam.py -b ~/box64/build/box64 -i 5
+sudo python3 box64_trace.py -b ~/box64/build/box64 -i 5
 
 # Focus on fork/exec lifecycle only (minimal overhead)
-sudo python3 box64_steam.py --no-mem --no-dynarec --no-mmap --no-threads --no-cow
+sudo python3 box64_trace.py --no-mem --no-dynarec --no-mmap --no-threads --no-cow
 
 # Trace a specific box64 process with full tracking
-sudo python3 box64_steam.py -p 12345
+sudo python3 box64_trace.py -p 12345
 
 # DynaRec-focused: 2s churn threshold, skip protection overhead
-sudo python3 box64_steam.py --no-mem --no-mmap --churn-threshold 2.0 --no-prot
+sudo python3 box64_trace.py --no-mem --no-mmap --churn-threshold 2.0 --no-prot
 ```
 
 ## Output

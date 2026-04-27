@@ -2,9 +2,8 @@
 import pytest
 from unittest.mock import mock_open, patch
 
-import box64_dynarec
 import box64_memleak
-import box64_steam
+import box64_trace
 
 
 # ---------------------------------------------------------------------------
@@ -23,7 +22,7 @@ SwapPss:               0 kB
 """
 
 
-@pytest.mark.parametrize("module", [box64_dynarec, box64_memleak, box64_steam])
+@pytest.mark.parametrize("module", [box64_memleak, box64_trace])
 class TestReadSmapsRollup:
     def test_parses_fields(self, module):
         m = mock_open(read_data=SMAPS_CONTENT)
@@ -61,7 +60,7 @@ class TestReadSmapsRollup:
 STAT_CONTENT = "1234 (box64) S 1233 1234 1234 0 -1 4194304 500 0 0 0 10 5 0 0 20 0 1 0 100 12345678 200 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0"
 
 
-@pytest.mark.parametrize("module", [box64_dynarec, box64_memleak, box64_steam])
+@pytest.mark.parametrize("module", [box64_memleak, box64_trace])
 class TestReadMinflt:
     def test_extracts_field_10(self, module):
         m = mock_open(read_data=STAT_CONTENT)
@@ -86,34 +85,34 @@ class TestReadProcCmdline:
         data = b"box64\x00game.exe\x00"
         m = mock_open(read_data=data)
         with patch("builtins.open", m):
-            result = box64_steam.read_proc_cmdline(1234)
+            result = box64_trace.read_proc_cmdline(1234)
         assert result == "game.exe"
 
     def test_non_box64_returns_argv0(self):
         data = b"/usr/bin/steam\x00--some-arg\x00"
         m = mock_open(read_data=data)
         with patch("builtins.open", m):
-            result = box64_steam.read_proc_cmdline(1234)
+            result = box64_trace.read_proc_cmdline(1234)
         assert result == "steam"
 
     def test_full_path_box64(self):
         data = b"/usr/local/bin/box64\x00/path/to/game.exe\x00"
         m = mock_open(read_data=data)
         with patch("builtins.open", m):
-            result = box64_steam.read_proc_cmdline(1234)
+            result = box64_trace.read_proc_cmdline(1234)
         # basename of argv[0] is "box64", so returns basename of argv[1]
         assert result == "game.exe"
 
     def test_empty_cmdline(self):
         m = mock_open(read_data=b"")
         with patch("builtins.open", m):
-            result = box64_steam.read_proc_cmdline(1234)
+            result = box64_trace.read_proc_cmdline(1234)
         assert result == "pid1234"
 
     def test_oserror_returns_pidN(self):
         with patch("builtins.open", side_effect=OSError):
-            result = box64_steam.read_proc_cmdline(1234)
+            result = box64_trace.read_proc_cmdline(1234)
         assert result == "pid1234"
 
-    def test_dynarec_has_no_read_proc_cmdline(self):
-        assert not hasattr(box64_dynarec, "read_proc_cmdline")
+    def test_memleak_has_no_read_proc_cmdline(self):
+        assert not hasattr(box64_memleak, "read_proc_cmdline")

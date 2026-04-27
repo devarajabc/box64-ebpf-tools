@@ -1,16 +1,15 @@
 """Tests for fmt_size() and fmt_ns() helper functions."""
 import pytest
 
-import box64_dynarec
 import box64_memleak
-import box64_steam
+import box64_trace
 
 
 # ---------------------------------------------------------------------------
 # fmt_size — present in all three tools
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("module", [box64_dynarec, box64_memleak, box64_steam])
+@pytest.mark.parametrize("module", [box64_memleak, box64_trace])
 class TestFmtSize:
     def test_zero(self, module):
         assert module.fmt_size(0) == "0.0 B"
@@ -39,10 +38,10 @@ class TestFmtSize:
 
 
 # ---------------------------------------------------------------------------
-# fmt_ns — dynarec + steam only (memleak has no fmt_ns)
+# fmt_ns — steam only (memleak has no fmt_ns)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("module", [box64_dynarec, box64_steam])
+@pytest.mark.parametrize("module", [box64_trace])
 class TestFmtNs:
     def test_nanoseconds(self, module):
         assert module.fmt_ns(500) == "500ns"
