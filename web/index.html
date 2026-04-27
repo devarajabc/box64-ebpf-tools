@@ -73,6 +73,24 @@
     <canvas id="c-prot" height="180"></canvas>
   </section>
 
+  <section class="panel wide" id="p-pids">
+    <h2>Per-Process Breakdown</h2>
+    <table id="pid-table" class="pid-table">
+      <thead>
+        <tr>
+          <th>PID</th><th>Label</th>
+          <th class="num">Threads</th>
+          <th class="num">JIT bytes</th>
+          <th class="num">JIT allocs</th>
+          <th class="num">Malloc bytes</th>
+          <th class="num">mmap bytes</th>
+          <th class="num">Contexts</th>
+        </tr>
+      </thead>
+      <tbody id="pid-tbody"></tbody>
+    </table>
+  </section>
+
   <section class="panel wide" id="p-events">
     <h2>Event Feed</h2>
     <div id="event-feed" class="feed"></div>

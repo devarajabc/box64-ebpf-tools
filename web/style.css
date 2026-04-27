@@ -234,3 +234,44 @@ body.light .kh-tooltip {
   .gauges { flex-wrap: wrap; }
   .kh-container { min-height: 300px; }
 }
+
+/* ----- box64_trace additions ----- */
+
+/* Anomaly coloring on gauge arcs */
+.gauge.warn .arc { stroke: #f4a02f; }
+.gauge.warn .g-val { color: #f4a02f; }
+.gauge.danger .arc { stroke: #e0533c; }
+.gauge.danger .g-val { color: #e0533c; }
+
+/* Per-PID breakdown table */
+.pid-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: monospace;
+  font-size: 12px;
+}
+.pid-table th, .pid-table td {
+  padding: 4px 8px;
+  text-align: left;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.15);
+}
+.pid-table th {
+  font-weight: 600;
+  background: rgba(127, 127, 127, 0.07);
+  position: sticky;
+  top: 0;
+}
+.pid-table .num { text-align: right; }
+.pid-table tr.row-warn { background: rgba(244, 160, 47, 0.10); }
+.pid-table tr.row-danger { background: rgba(224, 83, 60, 0.18); }
+.pid-table td.empty {
+  text-align: center;
+  color: rgba(127, 127, 127, 0.6);
+  font-style: italic;
+  padding: 16px;
+}
+
+/* Process / jit / cow event styling */
+.feed .ev.process { border-left: 3px solid #5b9cf2; padding-left: 6px; }
+.feed .ev.jit { border-left: 3px solid #a05ed9; padding-left: 6px; }
+.feed .ev.cow { border-left: 3px solid #f29c5b; padding-left: 6px; }

@@ -31,6 +31,49 @@ var KGauges = {
     return (n/1000000).toFixed(1) + 'M';
   },
 
+  fmtBytes: function(n) {
+    if (n < 1024) return n + 'B';
+    if (n < 1024*1024) return (n/1024).toFixed(1) + 'K';
+    if (n < 1024*1024*1024) return (n/(1024*1024)).toFixed(1) + 'M';
+    return (n/(1024*1024*1024)).toFixed(2) + 'G';
+  },
+
+  /* Apply level class to gauge wrapper for anomaly coloring */
+  setLevel: function(elId, val, warn, danger) {
+    var el = document.getElementById(elId);
+    if (!el) return;
+    el.classList.remove('warn', 'danger');
+    if (val >= danger) el.classList.add('danger');
+    else if (val >= warn) el.classList.add('warn');
+  },
+
+  renderPidTable: function(pids) {
+    var tbody = document.getElementById('pid-tbody');
+    if (!tbody || !pids) return;
+    /* Diff-friendly: rebuild only if row count changes; otherwise update cells.
+     * Simpler v1: full re-render. */
+    var rows = '';
+    for (var i = 0; i < pids.length; i++) {
+      var p = pids[i];
+      var label = p.label ? p.label : '';
+      /* Truncate long labels */
+      if (label.length > 32) label = label.substr(0, 29) + '...';
+      var dangerCls = p.jit_bytes > 1024*1024*1024 ? ' class="row-danger"' :
+                      (p.jit_bytes > 256*1024*1024 ? ' class="row-warn"' : '');
+      rows += '<tr' + dangerCls + '>' +
+              '<td>' + p.pid + '</td>' +
+              '<td>' + label + '</td>' +
+              '<td class="num">' + p.threads_alive + '</td>' +
+              '<td class="num">' + this.fmtBytes(p.jit_bytes) + '</td>' +
+              '<td class="num">' + this.fmtNum(p.jit_count) + '</td>' +
+              '<td class="num">' + this.fmtBytes(p.malloc_bytes) + '</td>' +
+              '<td class="num">' + this.fmtBytes(p.mmap_bytes) + '</td>' +
+              '<td class="num">' + p.context_created + '</td>' +
+              '</tr>';
+    }
+    tbody.innerHTML = rows || '<tr><td colspan="8" class="empty">no box64 processes seen yet</td></tr>';
+  },
+
   update: function(snap, prev) {
     /* Allocator rate (malloc + calloc + realloc + JIT alloc per second) */
     var allocRate = KState.rate(snap, prev, 'alloc.malloc') +
@@ -39,6 +82,7 @@ var KGauges = {
                     KState.rate(snap, prev, 'jit.alloc_count');
     document.getElementById('g-allocs-val').textContent = this.fmtNum(allocRate);
     this.drawArc('g-allocs-arc', Math.min(allocRate / 5000, 1));
+    this.setLevel('g-allocs', allocRate, 5000, 20000);
 
     /* Outstanding JIT MB */
     var jitMB = (snap.jit && snap.jit.outstanding_bytes) ?
@@ -46,11 +90,13 @@ var KGauges = {
     document.getElementById('g-jit-val').textContent =
       jitMB < 1000 ? jitMB.toFixed(1) : (jitMB/1000).toFixed(2) + 'G';
     this.drawArc('g-jit-arc', Math.min(jitMB / 200, 1));
+    this.setLevel('g-jit', jitMB, 256, 1024);   /* warn 256 MB, danger 1 GB */
 
     /* Forks (cumulative — gauge fills as box64 spawns processes) */
     var forks = snap.process ? snap.process.fork + snap.process.vfork : 0;
     document.getElementById('g-fork-val').textContent = forks;
     this.drawArc('g-fork-arc', Math.min(forks / 50, 1));
+    this.setLevel('g-fork', forks, 50, 200);
 
     /* Threads alive (create_return - destroy_entry) */
     var threadsAlive = 0;
@@ -60,6 +106,10 @@ var KGauges = {
     }
     document.getElementById('g-threads-val').textContent = threadsAlive;
     this.drawArc('g-threads-arc', Math.min(threadsAlive / 64, 1));
+    this.setLevel('g-threads', threadsAlive, 64, 256);
+
+    /* Per-PID table */
+    if (snap.pids) this.renderPidTable(snap.pids);
 
     /* Bottom-line stats */
     if (snap.alloc) {

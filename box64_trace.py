@@ -1841,6 +1841,8 @@ def main():
     timeline = []
     proc_children = {}     # parent_pid -> [child_pid, ...]
     pid_labels = {}        # pid -> string
+    # Set later by --web; read by handle_lifecycle_event for SSE emission.
+    _web_emit = None
     smaps_history = {}     # pid -> [(monotonic_time, smaps_dict), ...]
     pv_events = []         # [(ts_ns, pid, prog_path)]
     context_events = []    # [(ts_ns, pid, event_type)]
@@ -1978,17 +1980,33 @@ def main():
             if evt.child_pid not in pid_labels:
                 # Inherit parent label until child does exec
                 pid_labels[evt.child_pid] = pid_labels.get(pid, f"pid{evt.child_pid}")
+            if _web_emit:
+                _web_emit('process', {
+                    "action": "fork", "pid": pid, "child_pid": evt.child_pid,
+                    "label": pid_labels.get(pid, "")
+                })
 
         elif etype in (4, 5, 6, 7):  # exec* — update label to target binary
             if path:
                 pid_labels[pid] = path.split('/')[-1]
+            if _web_emit:
+                _web_emit('process', {
+                    "action": EVENT_NAMES.get(etype, "exec"),
+                    "pid": pid, "cmd": path
+                })
 
         elif etype in (8, 9):  # posix_spawn* — spawns child, parent continues unchanged
-            pass
+            if _web_emit:
+                _web_emit('process', {
+                    "action": EVENT_NAMES.get(etype, "spawn"),
+                    "pid": pid, "cmd": path
+                })
 
         elif etype == 10:  # pressure_vessel
             pv_events.append((ts_ns, pid, path))
             print(f"  [!] pressure_vessel() detected: PID {pid} prog={path!r}")
+            if _web_emit:
+                _web_emit('process', {"action": "pressure_vessel", "pid": pid, "cmd": path})
 
         elif etype in (11, 12):
             context_events.append((ts_ns, pid, etype))
@@ -2113,6 +2131,42 @@ def main():
         return [st[st.Key(i)].value for i in range(32)]
 
     # ---- Web dashboard snapshot (only built if --web is on) ----
+    def _per_pid_snapshot():
+        """Per-PID breakdown read from proc_mem BPF hash + thread_stats.
+
+        Builds a list of {pid, label, malloc_bytes, jit_bytes, mmap_bytes,
+        threads_alive} for the dashboard table.
+        """
+        rows = []
+        # Count threads alive per pid by iterating active_threads (tid -> thread_info)
+        threads_per_pid = {}
+        if track_threads:
+            try:
+                for _, info in b["active_threads"].items():
+                    threads_per_pid[info.pid] = threads_per_pid.get(info.pid, 0) + 1
+            except Exception:
+                pass
+        try:
+            for k, pm in b["proc_mem"].items():
+                pid = k.value
+                rows.append({
+                    "pid": pid,
+                    "label": pid_labels.get(pid, ""),
+                    "malloc_bytes": pm.malloc_bytes - pm.free_bytes,
+                    "malloc_count": pm.malloc_count,
+                    "free_count": pm.free_count,
+                    "jit_bytes": pm.jit_alloc_bytes - pm.jit_free_bytes,
+                    "jit_count": pm.jit_alloc_count,
+                    "mmap_bytes": pm.mmap_bytes + pm.box_mmap_bytes,
+                    "threads_alive": threads_per_pid.get(pid, 0),
+                    "context_created": pm.context_created,
+                })
+        except Exception:
+            pass
+        # Sort by JIT bytes desc — heaviest emulator process first
+        rows.sort(key=lambda r: r["jit_bytes"], reverse=True)
+        return rows[:32]   # cap to keep payload small
+
     def web_snapshot():
         v = read_stats()
         # thread_counters: 0=create_entry,1=create_return,2=start_entry,
@@ -2155,6 +2209,7 @@ def main():
                 "start_entry": tc[2], "destroy_entry": tc[3],
                 "fork_entry": tc[4], "clone_entry": tc[5],
             },
+            "pids": _per_pid_snapshot(),
         }
 
     def web_stats_meta():
