@@ -243,7 +243,12 @@ body.light .kh-tooltip {
 .gauge.danger .arc { stroke: #e0533c; }
 .gauge.danger .g-val { color: #e0533c; }
 
-/* Per-PID breakdown table */
+/* Per-PID breakdown table — bounded height so the panel doesn't push
+ * other panels around as more box64 processes appear. */
+#p-pids {
+  max-height: 320px;
+  overflow-y: auto;
+}
 .pid-table {
   width: 100%;
   border-collapse: collapse;
@@ -260,6 +265,7 @@ body.light .kh-tooltip {
   background: rgba(127, 127, 127, 0.07);
   position: sticky;
   top: 0;
+  z-index: 1;
 }
 .pid-table .num { text-align: right; }
 .pid-table tr.row-warn { background: rgba(244, 160, 47, 0.10); }
@@ -270,6 +276,16 @@ body.light .kh-tooltip {
   font-style: italic;
   padding: 16px;
 }
+
+/* Event feed — bounded height with scroll */
+#p-events { max-height: 360px; }
+#event-feed {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+/* Ensure chart panels keep a fixed height regardless of polling cadence */
+.panel canvas { max-height: 200px; }
 
 /* Process / jit / cow event styling */
 .feed .ev.process { border-left: 3px solid #5b9cf2; padding-left: 6px; }
