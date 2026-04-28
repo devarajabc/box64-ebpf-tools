@@ -1532,9 +1532,17 @@ def parse_args():
                    help="BPF hash table capacity for outstanding alloc tracking (default: 524288)")
     p.add_argument("--sample-freq", type=int, default=0,
                    help="PC sampling frequency in Hz for block profiling (0=off, 4999=recommended, max ~9999)")
-    p.add_argument("--web", type=int, nargs="?", const=8642, default=0, metavar="PORT",
-                   help="Start a web dashboard on http://127.0.0.1:PORT (default 8642). "
-                        "Uses kbox-derived frontend in web/. Auto-enabled in spawn mode.")
+    # The default web port is read from $BOX64_WEB_PORT if set, else 8642
+    # (the inherited kbox-observatory default). The pre-flight check below
+    # auto-scans upward if the chosen port is busy, so this is just a
+    # starting point, not a hard requirement.
+    _default_web = int(os.environ.get("BOX64_WEB_PORT", "8642"))
+    p.add_argument("--web", type=int, nargs="?", const=_default_web, default=0,
+                   metavar="PORT",
+                   help=f"Start a web dashboard on http://127.0.0.1:PORT "
+                        f"(default {_default_web}, override globally with "
+                        f"$BOX64_WEB_PORT). Auto-scans upward if the port "
+                        f"is busy. Auto-enabled in spawn mode.")
     p.add_argument("--no-web", action="store_true",
                    help="Disable the web dashboard (only meaningful in spawn mode, "
                         "where --web is otherwise auto-enabled)")
@@ -1799,7 +1807,8 @@ def main():
     spawned_pid = None
     if args.command:
         if not args.web and not args.no_web:
-            args.web = 8642  # default dashboard port in spawn mode
+            # Use the same env-overridable default as the --web flag.
+            args.web = int(os.environ.get("BOX64_WEB_PORT", "8642"))
 
         # Validate the command will actually exec BEFORE we spend ~10s
         # compiling BPF and attaching 42 probes. May auto-rewrite cmd[0]
@@ -3471,7 +3480,8 @@ def main():
                 print(f"WARNING: permission denied binding port {args.web} — "
                       f"dashboard disabled.")
                 print(f"         Ports < 1024 require CAP_NET_BIND_SERVICE; "
-                      f"pick a higher port with `--web 8642`.")
+                      f"pick a higher port with `--web NNNN` "
+                      f"(any value > 1024).")
             else:
                 print(f"WARNING: failed to start web dashboard ({e}) — "
                       f"continuing without it.")

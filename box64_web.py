@@ -326,6 +326,42 @@ def shutdown(server):
         pass
 
 
+def _firefox_is_running():
+    """
+    Best-effort: True iff a process whose comm is firefox/firefox-bin
+    /firefox-esr is currently alive on this system.
+
+    /proc-based scan, no pgrep dependency. Used by the auto-open
+    resolver to decide between `firefox --new-tab` (talks to existing
+    instance, no profile-lock collision) and `xdg-open` (which would
+    spawn a fresh firefox and trigger the "already running but not
+    responding" dialog).
+    """
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/comm") as f:
+                    comm = f.read().strip()
+            except OSError:
+                continue
+            if comm in ("firefox", "firefox-bin", "firefox-esr",
+                        "MainThread"):  # MainThread: Firefox renames its main thread
+                # Confirm with cmdline so we don't false-positive on
+                # an unrelated process literally named "firefox".
+                try:
+                    with open(f"/proc/{entry}/cmdline", "rb") as f:
+                        cmd = f.read()
+                    if b"firefox" in cmd:
+                        return True
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return False
+
+
 def _open_browser(url, pref="auto"):
     """
     Try to open `url` in a browser.
@@ -379,8 +415,19 @@ def _open_browser(url, pref="auto"):
         if _spawn([cand, url]):
             return True, f"launched $BROWSER ({cand})"
 
-    # auto: xdg-open
     import shutil
+
+    # auto: if Firefox is already running AND on PATH, prefer
+    # `firefox --new-tab URL` over xdg-open. xdg-open spawns a fresh
+    # firefox process that fights the running instance's profile lock,
+    # producing the "Firefox is already running, but is not responding"
+    # dialog. Firefox's --new-tab uses remote control to deliver the
+    # URL to the existing instance instead — no lock contention.
+    if (shutil.which("firefox") and _firefox_is_running()
+            and _spawn(["firefox", "--new-tab", url])):
+        return True, "launched 'firefox --new-tab' (delivered to running instance)"
+
+    # auto: xdg-open
     if shutil.which("xdg-open") and _spawn(["xdg-open", url]):
         return True, "launched via xdg-open"
 

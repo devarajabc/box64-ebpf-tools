@@ -105,13 +105,40 @@ class TestAutoMode:
         assert original_fail[1][0] == "chromium"
 
     def test_falls_back_to_xdg_open(self, fake_popen, no_env_browser, monkeypatch):
-        # Force shutil.which to claim xdg-open exists.
+        # Force shutil.which to claim xdg-open exists, firefox doesn't.
         monkeypatch.setattr("shutil.which",
                             lambda name: "/usr/bin/xdg-open" if name == "xdg-open" else None)
+        # No firefox running, so auto skips the firefox --new-tab branch.
+        monkeypatch.setattr(box64_web, "_firefox_is_running", lambda: False)
         opened, detail = box64_web._open_browser(URL, "auto")
         assert opened is True
         assert "xdg-open" in detail
         assert fake_popen == [["xdg-open", URL]]
+
+    def test_running_firefox_uses_new_tab_not_xdg_open(
+            self, fake_popen, no_env_browser, monkeypatch):
+        # If Firefox is already running, prefer `firefox --new-tab URL`
+        # over xdg-open to avoid the profile-lock dialog.
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(box64_web, "_firefox_is_running", lambda: True)
+        opened, detail = box64_web._open_browser(URL, "auto")
+        assert opened is True
+        assert "new-tab" in detail or "running instance" in detail
+        # Crucially, firefox --new-tab is what was launched, NOT xdg-open.
+        assert fake_popen[0] == ["firefox", "--new-tab", URL]
+        assert all("xdg-open" not in c for c in fake_popen)
+
+    def test_no_running_firefox_skips_new_tab_branch(
+            self, fake_popen, no_env_browser, monkeypatch):
+        # Firefox is on PATH but not running → don't try --new-tab; fall
+        # through to xdg-open so the user's actual default browser wins.
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(box64_web, "_firefox_is_running", lambda: False)
+        opened, detail = box64_web._open_browser(URL, "auto")
+        assert opened is True
+        assert "xdg-open" in detail
+        # We never tried firefox --new-tab.
+        assert all(c[0] != "firefox" for c in fake_popen)
 
     def test_falls_back_to_webbrowser_module(self, fake_popen, no_env_browser, monkeypatch):
         # No xdg-open, but webbrowser.open succeeds.
