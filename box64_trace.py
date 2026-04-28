@@ -1685,6 +1685,23 @@ def _validate_spawn_command(cmd):
              "relative path with `./` or `/`."))
 
 
+def _wait_for_user_signal(flag, poll_interval=0.5):
+    """Block until `flag[0]` becomes truthy.
+
+    Used by main()'s post-child-exit "keep the dashboard alive" loop.
+    We can't use signal.pause() or a single long sleep here: our SIGINT
+    handler (sig_handler in main) sets the flag and returns without
+    raising, so KeyboardInterrupt never fires. A naive
+    `while True: time.sleep(...)` would just restart the sleep on every
+    Ctrl+C and the user could never exit.
+    """
+    try:
+        while not flag[0]:
+            time.sleep(poll_interval)
+    except KeyboardInterrupt:
+        pass
+
+
 def _spawn_paused(cmd):
     """
     Fork+exec `cmd`, but SIGSTOP the child *before* exec so the parent has
@@ -3530,13 +3547,7 @@ def main():
         host_port = f"{web_server.server_address[0]}:{web_server.server_address[1]}"
         print(f"[*] Dashboard still serving at http://{host_port}/ — "
               f"Ctrl+C to shut down (will exit rc={child_returncode[0]}).")
-        try:
-            # Block on a long sleep loop instead of signal.pause() so we
-            # remain testable on platforms where pause() needs threads.
-            while True:
-                time.sleep(3600)
-        except KeyboardInterrupt:
-            pass
+        _wait_for_user_signal(_user_signalled)
 
     # Tear down the dashboard cleanly. Idempotent — shutdown() on an
     # already-stopped server is a no-op.

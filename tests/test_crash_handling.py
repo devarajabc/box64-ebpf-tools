@@ -154,3 +154,71 @@ class TestWebShutdown:
                 for q in (full_q, ok_q):
                     if q in box64_web._state["sse_clients"]:
                         box64_web._state["sse_clients"].remove(q)
+
+
+# ---------------------------------------------------------------------------
+# _wait_for_user_signal: post-child-exit "keep dashboard alive" loop.
+# Regression for: after FINAL REPORT printed, the tracer printed
+# "Dashboard still serving — Ctrl+C to shut down" but Ctrl+C did not
+# actually terminate. The custom sig_handler in main() sets a flag and
+# returns without raising KeyboardInterrupt, so a `while True: time.sleep`
+# loop just restarted the sleep on every signal and the user had to
+# SIGKILL the process.
+# ---------------------------------------------------------------------------
+
+class TestWaitForUserSignal:
+    def test_returns_when_flag_set_before_call(self):
+        # Trivial fast path: flag already set, no wait at all.
+        flag = [True]
+        import time
+        t0 = time.monotonic()
+        box64_trace._wait_for_user_signal(flag, poll_interval=0.05)
+        assert time.monotonic() - t0 < 0.5
+
+    def test_returns_promptly_after_flag_flips(self):
+        # The real bug: under the old `while True: time.sleep(3600)` form,
+        # this test would hang for an hour. We assert the function returns
+        # within a tight bound after the flag is set externally.
+        import threading
+        import time
+        flag = [False]
+        done = threading.Event()
+
+        def _waiter():
+            box64_trace._wait_for_user_signal(flag, poll_interval=0.05)
+            done.set()
+
+        t = threading.Thread(target=_waiter, daemon=True)
+        t.start()
+
+        time.sleep(0.1)
+        assert not done.is_set(), (
+            "wait returned before flag was set — flag-poll loop is broken")
+
+        # Flip the flag the way sig_handler does in main().
+        flag[0] = True
+        # Should return well within the poll_interval + a little slack.
+        assert done.wait(timeout=1.0), (
+            "wait did not return within 1s of the flag being set — "
+            "regression: sig_handler-style flag flip is being ignored")
+
+    def test_swallows_keyboardinterrupt_for_belt_and_suspenders(self):
+        # In the rare case where SIGINT arrives between the time.sleep
+        # call and Python checking signals (e.g. on a build where the
+        # default int handler is somehow restored), KeyboardInterrupt
+        # might leak out. We catch it and return cleanly so the caller
+        # always gets to its shutdown(server) call.
+        flag = [False]
+
+        def _raising_sleep(_):
+            flag[0] = True  # simulate sig_handler running before raise
+            raise KeyboardInterrupt()
+
+        import time
+        original = time.sleep
+        time.sleep = _raising_sleep
+        try:
+            box64_trace._wait_for_user_signal(flag, poll_interval=0.01)
+        finally:
+            time.sleep = original
+        # No exception propagated — that's the assertion.
