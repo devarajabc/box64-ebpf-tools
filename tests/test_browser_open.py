@@ -298,6 +298,119 @@ class TestUserSessionEnv:
         }
 
 
+class TestRegressionSudoFirefoxLockDialog:
+    """End-to-end regression for the 'Firefox is already running, but is
+    not responding' profile-lock dialog.
+
+    The bug had two halves:
+      1. Without `--new-tab`, sudo'd Firefox starts a fresh instance
+         that fights the user's existing Firefox over the profile lock.
+      2. Even with `--new-tab`, sudo strips the operator's GUI session
+         env (DISPLAY, WAYLAND_DISPLAY, DBus address, XDG_RUNTIME_DIR,
+         XAUTHORITY) — so the new-tab dispatch can't reach the running
+         instance over DBus / XRemote and *also* falls back to a fresh
+         process.
+
+    Both halves must be correct simultaneously. This test exercises the
+    real `_open_browser` → `_user_session_env` pipeline (no mocking of
+    `_user_session_env`) and asserts that the spawned argv contains
+    BOTH the `--new-tab` flag AND the session env vars repopulated via
+    an `env K=V` shim.
+    """
+
+    def test_full_pipeline_carries_new_tab_and_session_env(
+            self, fake_popen, monkeypatch):
+        import pwd
+        from io import BytesIO
+
+        # Set up the regression scenario: tool invoked under sudo by
+        # alice (uid 1000), who has Firefox already running.
+        monkeypatch.setenv("SUDO_USER", "alice")
+        monkeypatch.delenv("BROWSER", raising=False)
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+
+        class _Pw:
+            pw_uid = 1000
+        monkeypatch.setattr(pwd, "getpwnam",
+                            lambda name: _Pw if name == "alice" else (_ for _ in ()).throw(KeyError(name)))
+
+        # Fake /proc: alice's running Firefox at pid 4321 carries the
+        # full session env; pid 1 is init owned by root and must be
+        # ignored even though it has its own environ.
+        monkeypatch.setattr(os, "listdir",
+                            lambda p: ["1", "4321"] if p == "/proc" else [])
+
+        real_stat = os.stat
+
+        class _Stat:
+            def __init__(self, uid):
+                self.st_uid = uid
+
+        proc_uids = {"/proc/1": 0, "/proc/4321": 1000}
+
+        def fake_stat(path, *a, **kw):
+            # Only intercept /proc/<pid> stats; everything else (pytest
+            # internals, real fs paths) must hit the real os.stat or
+            # the test fixture spills into unrelated machinery.
+            if str(path) in proc_uids:
+                return _Stat(proc_uids[str(path)])
+            return real_stat(path, *a, **kw)
+        monkeypatch.setattr(os, "stat", fake_stat)
+
+        firefox_environ = (
+            b"DISPLAY=:0\x00"
+            b"WAYLAND_DISPLAY=wayland-0\x00"
+            b"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus\x00"
+            b"XDG_RUNTIME_DIR=/run/user/1000\x00"
+            b"HOME=/home/alice\x00"
+            b"XAUTHORITY=/home/alice/.Xauthority\x00"
+        )
+
+        real_open = open
+
+        def fake_open(path, mode="r", *a, **kw):
+            if path == "/proc/4321/environ":
+                return BytesIO(firefox_environ)
+            if path == "/proc/1/environ":
+                # Root-owned process; should never be read because the
+                # uid filter rejects it. If we accidentally do read it,
+                # blow up loudly so the regression test catches it.
+                raise AssertionError("env extraction read a root-owned /proc entry")
+            return real_open(path, mode, *a, **kw)
+
+        import builtins
+        monkeypatch.setattr(builtins, "open", fake_open)
+
+        # Trigger the real auto-open path with --browser firefox.
+        opened, _detail = box64_web._open_browser(URL, "firefox")
+        assert opened is True
+
+        argv = fake_popen[0]
+
+        # Must drop privs to alice via sudo -u.
+        assert argv[:3] == ["sudo", "-u", "alice"]
+        # Must pass through `env` so the K=V pairs survive sudo.
+        assert argv[3] == "env"
+        # All six discovered session vars must be present (order-independent).
+        env_pairs = set()
+        for token in argv[4:]:
+            if "=" in token and not token.startswith("--") and token != URL:
+                env_pairs.add(token)
+            else:
+                break  # cmd starts here
+        assert env_pairs == {
+            "DISPLAY=:0",
+            "WAYLAND_DISPLAY=wayland-0",
+            "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+            "XDG_RUNTIME_DIR=/run/user/1000",
+            "HOME=/home/alice",
+            "XAUTHORITY=/home/alice/.Xauthority",
+        }
+        # The actual command must be `firefox --new-tab URL` (both halves
+        # of the fix at once: lock-safe flag AND session env).
+        assert argv[-3:] == ["firefox", "--new-tab", URL]
+
+
 class TestBrowserArgv:
     def test_firefox_family_gets_new_tab(self):
         for cmd in ("firefox", "firefox-bin", "firefox-esr",
