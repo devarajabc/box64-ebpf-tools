@@ -1816,35 +1816,63 @@ def main():
                 sys.exit(127)
 
         # If the user asked for a dashboard, pre-flight the port BEFORE
-        # we spend ~10s compiling BPF. Better to flip to --no-web mode
-        # now than to run the full setup and then fail at server start.
+        # we spend ~10s compiling BPF. Try the preferred port first;
+        # on EADDRINUSE, scan upward 19 ports; if all are taken, ask
+        # the kernel for any free ephemeral port. The user gets the
+        # dashboard either way — we just print which port we picked.
         if args.web and not args.no_web:
             import socket
-            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # Match the real server: SO_REUSEADDR so a recently-killed
-            # tracer's TIME_WAIT socket doesn't make us false-positive.
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                probe.bind(("127.0.0.1", args.web))
-            except OSError as e:
+            preferred = args.web
+
+            def _try_bind(port):
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    s.bind(("127.0.0.1", port))
+                    actual = s.getsockname()[1]
+                    return (actual, None)
+                except OSError as exc:
+                    return (None, exc)
+                finally:
+                    s.close()
+
+            chosen, last_err = None, None
+            # Try preferred port and 19 above it.
+            for offset in range(20):
+                port = preferred + offset
+                actual, exc = _try_bind(port)
+                if actual is not None:
+                    chosen = actual
+                    break
+                last_err = exc
+                # EACCES on low ports is fatal — no point scanning.
                 import errno as _err
-                if e.errno == _err.EADDRINUSE:
-                    print(f"WARNING: port {args.web} is already in use — "
-                          f"continuing without the dashboard.")
-                    print(f"         Use `--web {args.web + 1}` (or any free "
-                          f"port), or `--no-web` to silence this. "
-                          f"`ss -lntp | grep ':{args.web} '` shows the holder.")
-                elif e.errno == _err.EACCES:
+                if exc and exc.errno == _err.EACCES:
+                    break
+            # Last resort: ask the kernel for any free port.
+            if chosen is None and not (last_err and last_err.errno == _err.EACCES):
+                actual, exc = _try_bind(0)
+                if actual is not None:
+                    chosen = actual
+                else:
+                    last_err = exc
+
+            if chosen is None:
+                if last_err and last_err.errno == _err.EACCES:
                     print(f"WARNING: permission denied binding port "
-                          f"{args.web} — continuing without the dashboard.")
+                          f"{preferred} — continuing without the dashboard.")
                     print(f"         Ports below 1024 need "
                           f"CAP_NET_BIND_SERVICE; pick a higher port.")
                 else:
-                    print(f"WARNING: cannot bind port {args.web} ({e}) — "
-                          f"continuing without the dashboard.")
+                    print(f"WARNING: could not find a free port near "
+                          f"{preferred} ({last_err}) — continuing without "
+                          f"the dashboard.")
                 args.web = 0  # disable dashboard cleanly
-            finally:
-                probe.close()
+            elif chosen != preferred:
+                print(f"[*] Port {preferred} taken; dashboard will use "
+                      f"{chosen} instead.")
+                args.web = chosen
+            # else: preferred port is free, no announcement needed.
 
         cmd_str = " ".join(args.command)
         print(f"[*] Spawning: {cmd_str}")
