@@ -1815,6 +1815,34 @@ def main():
                 print(f"       {hint}", file=sys.stderr)
                 sys.exit(127)
 
+        # If the user asked for a dashboard, pre-flight the port BEFORE
+        # we spend ~10s compiling BPF. Better to flip to --no-web mode
+        # now than to run the full setup and then fail at server start.
+        if args.web and not args.no_web:
+            import socket
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                probe.bind(("127.0.0.1", args.web))
+            except OSError as e:
+                import errno as _err
+                if e.errno == _err.EADDRINUSE:
+                    print(f"WARNING: port {args.web} is already in use — "
+                          f"continuing without the dashboard.")
+                    print(f"         Use `--web {args.web + 1}` (or any free "
+                          f"port), or `--no-web` to silence this. "
+                          f"`ss -lntp | grep ':{args.web} '` shows the holder.")
+                elif e.errno == _err.EACCES:
+                    print(f"WARNING: permission denied binding port "
+                          f"{args.web} — continuing without the dashboard.")
+                    print(f"         Ports below 1024 need "
+                          f"CAP_NET_BIND_SERVICE; pick a higher port.")
+                else:
+                    print(f"WARNING: cannot bind port {args.web} ({e}) — "
+                          f"continuing without the dashboard.")
+                args.web = 0  # disable dashboard cleanly
+            finally:
+                probe.close()
+
         cmd_str = " ".join(args.command)
         print(f"[*] Spawning: {cmd_str}")
         try:
