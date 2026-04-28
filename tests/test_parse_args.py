@@ -107,3 +107,43 @@ class TestSteamArgs:
         monkeypatch.setattr("sys.argv", ["prog"])
         args = box64_trace.parse_args()
         assert args.hash_capacity == 524288
+
+
+# ---------------------------------------------------------------------------
+# Spawn-and-trace mode (`-- COMMAND ARGS...`)
+# ---------------------------------------------------------------------------
+
+class TestSpawnMode:
+    def test_no_command_by_default(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["prog"])
+        args = box64_trace.parse_args()
+        assert args.command == []
+        assert args.no_web is False
+
+    def test_command_after_separator(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.argv", ["prog", "--", "box64", "doom.exe", "--fast"])
+        args = box64_trace.parse_args()
+        assert args.command == ["box64", "doom.exe", "--fast"]
+
+    def test_command_preserves_command_flags(self, monkeypatch):
+        # Flags belonging to the COMMAND must not be parsed by our argparse.
+        monkeypatch.setattr(
+            "sys.argv", ["prog", "-i", "5", "--", "./game", "--no-web"])
+        args = box64_trace.parse_args()
+        assert args.interval == 5
+        assert args.command == ["./game", "--no-web"]
+        assert args.no_web is False  # ours, not the COMMAND's
+
+    def test_no_web_flag(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.argv", ["prog", "--no-web", "--", "box64", "prog"])
+        args = box64_trace.parse_args()
+        assert args.no_web is True
+        assert args.command == ["box64", "prog"]
+
+    def test_empty_command_after_separator(self, monkeypatch):
+        # `prog --` with nothing after is an empty command list, not spawn mode.
+        monkeypatch.setattr("sys.argv", ["prog", "--"])
+        args = box64_trace.parse_args()
+        assert args.command == []

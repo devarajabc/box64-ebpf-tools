@@ -1471,14 +1471,29 @@ int on_perf_sample(struct bpf_perf_event_data *ctx) {
 # ---------------------------------------------------------------------------
 
 def parse_args():
+    # Split argv on `--` so the spawn-mode COMMAND can contain its own flags
+    # without colliding with our argparse options.
+    raw = sys.argv[1:]
+    if "--" in raw:
+        idx = raw.index("--")
+        argv, command = raw[:idx], raw[idx + 1:]
+    else:
+        argv, command = raw, []
+
     p = argparse.ArgumentParser(
         description="Trace Box64+Steam multi-process behavior: "
                     "fork/exec lifecycle, per-PID memory, DynaRec JIT, "
-                    "mmap, and pressure-vessel detection using eBPF uprobes")
+                    "mmap, and pressure-vessel detection using eBPF uprobes",
+        epilog="Spawn-and-trace: append `-- COMMAND ARGS...` to launch a "
+               "program under tracing (e.g. `-- box64 ./game.exe`). The "
+               "browser dashboard auto-opens; trace exits with COMMAND's "
+               "return code.")
     p.add_argument("-b", "--binary", default="/usr/local/bin/box64",
-                   help="Path to box64 binary (default: /usr/local/bin/box64)")
+                   help="Path to box64 binary (default: /usr/local/bin/box64; "
+                        "falls back to `which box64` if missing)")
     p.add_argument("-p", "--pid", type=int, default=0,
-                   help="Filter by PID (default: trace all box64 processes)")
+                   help="Filter by PID (default: trace all box64 processes; "
+                        "ignored in spawn mode)")
     p.add_argument("-i", "--interval", type=int, default=15,
                    help="Summary interval in seconds (default: 15)")
     p.add_argument("--no-mem", action="store_true",
@@ -1503,8 +1518,13 @@ def parse_args():
                    help="PC sampling frequency in Hz for block profiling (0=off, 4999=recommended, max ~9999)")
     p.add_argument("--web", type=int, nargs="?", const=8642, default=0, metavar="PORT",
                    help="Start a web dashboard on http://127.0.0.1:PORT (default 8642). "
-                        "Uses kbox-derived frontend in web/.")
-    return p.parse_args()
+                        "Uses kbox-derived frontend in web/. Auto-enabled in spawn mode.")
+    p.add_argument("--no-web", action="store_true",
+                   help="Disable the web dashboard (only meaningful in spawn mode, "
+                        "where --web is otherwise auto-enabled)")
+    args = p.parse_args(argv)
+    args.command = command
+    return args
 
 
 from box64_common import (
@@ -1526,12 +1546,55 @@ from box64_common import (
 
 
 # ---------------------------------------------------------------------------
+# Spawn-and-trace helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_box64_binary(binary):
+    """If `binary` does not exist, fall back to `which box64`."""
+    if os.path.exists(binary):
+        return binary
+    import shutil
+    found = shutil.which("box64")
+    return found or binary  # let check_binary fail with a clear message
+
+
+def _spawn_paused(cmd):
+    """
+    Fork+exec `cmd`, but SIGSTOP the child *before* exec so the parent has
+    a window to attach uprobes to the box64 binary before any guest code
+    runs. Returns the child PID; caller must SIGCONT to resume.
+
+    With binfmt_misc registered, exec'ing an x86_64 ELF transparently
+    routes through the box64 interpreter while keeping the same PID, so
+    PID-filtered probes still match.
+    """
+    pid = os.fork()
+    if pid == 0:
+        # Child: stop ourselves so the parent can attach probes. The exec
+        # only runs after the parent sends SIGCONT.
+        os.kill(os.getpid(), signal.SIGSTOP)
+        try:
+            os.execvp(cmd[0], cmd)
+        except OSError as e:
+            print(f"box64_trace: exec '{cmd[0]}' failed: {e}", file=sys.stderr)
+            os._exit(127)
+    # Parent: confirm the child has actually reached the stopped state
+    # before continuing. WUNTRACED makes waitpid() return on stop signals.
+    _, status = os.waitpid(pid, os.WUNTRACED)
+    if not os.WIFSTOPPED(status):
+        raise RuntimeError(
+            f"spawned child {pid} did not stop as expected (status={status:#x})")
+    return pid
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
     args = parse_args()
-    binary = args.binary
+    binary = _resolve_box64_binary(args.binary)
+    args.binary = binary
 
     # Validate binary
     check_binary(binary)
@@ -1608,6 +1671,39 @@ def main():
             track_threads = False
         else:
             has_clone_sym = not check_symbols_soft(binary, ["my_clone"])
+
+    # ---- Spawn-and-trace mode ----
+    # If a `-- COMMAND` was given, fork it now in stopped state, pin our
+    # PID filter to its PID, and auto-enable the web dashboard. The child
+    # is resumed (SIGCONT) only after probes have been attached below.
+    spawned_pid = None
+    if args.command:
+        if not args.web and not args.no_web:
+            args.web = 8642  # default dashboard port in spawn mode
+        cmd_str = " ".join(args.command)
+        print(f"[*] Spawning: {cmd_str}")
+        try:
+            spawned_pid = _spawn_paused(args.command)
+        except (OSError, RuntimeError) as e:
+            print(f"ERROR: failed to spawn '{cmd_str}': {e}", file=sys.stderr)
+            sys.exit(1)
+        args.pid = spawned_pid
+        print(f"[*] Child PID {spawned_pid} stopped — attaching probes...")
+
+        # Make sure a stopped child never gets orphaned if BPF setup fails
+        # before we hit the SIGCONT below.
+        import atexit
+
+        def _cleanup_spawned(pid=spawned_pid):
+            try:
+                os.kill(pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        atexit.register(_cleanup_spawned)
 
     # Build cflags
     hash_cap = args.hash_capacity
@@ -1828,8 +1924,18 @@ def main():
     print(f"[*] {probe_count} probes attached{pid_str}. Features: {', '.join(features)}.{churn_str} "
           f"Interval: {args.interval}s. Ctrl+C to stop.")
 
+    # ---- Resume spawned child (probes are now live) ----
+    if spawned_pid is not None:
+        try:
+            os.kill(spawned_pid, signal.SIGCONT)
+            print(f"[*] Resumed child PID {spawned_pid}.")
+        except ProcessLookupError:
+            print(f"WARNING: child PID {spawned_pid} disappeared before resume.")
+            spawned_pid = None
+
     # ---- Graceful exit ----
     exiting = [False]
+    child_returncode = [0]
 
     def sig_handler(signum, frame):
         exiting[0] = True
@@ -3142,11 +3248,32 @@ def main():
     prev_vals = read_stats()
     last_print = time.monotonic()
 
+    def _poll_child_exit():
+        """Reap spawned child if it has exited; flip exiting + capture rc."""
+        nonlocal spawned_pid
+        if spawned_pid is None:
+            return
+        try:
+            wpid, status = os.waitpid(spawned_pid, os.WNOHANG)
+        except ChildProcessError:
+            spawned_pid = None
+            return
+        if wpid == spawned_pid:
+            if os.WIFEXITED(status):
+                child_returncode[0] = os.WEXITSTATUS(status)
+            elif os.WIFSIGNALED(status):
+                child_returncode[0] = 128 + os.WTERMSIG(status)
+            print(f"[*] Child PID {spawned_pid} exited (rc={child_returncode[0]}); "
+                  f"finishing report.")
+            spawned_pid = None
+            exiting[0] = True
+
     while not exiting[0]:
         try:
             deadline = time.monotonic() + args.interval
             while time.monotonic() < deadline and not exiting[0]:
                 b.perf_buffer_poll(timeout=1000)
+                _poll_child_exit()
         except KeyboardInterrupt:
             exiting[0] = True
             break
@@ -3181,6 +3308,22 @@ def main():
     print_final_report(vals)
     _close_proc_mem_fds()
     print("[*] Detaching probes.")
+
+    # Spawn mode: forward COMMAND's exit code so the wrapper is transparent
+    # to scripts. If the child is still running (Ctrl+C path), terminate it
+    # so we don't leak a process.
+    if spawned_pid is not None:
+        try:
+            os.kill(spawned_pid, signal.SIGTERM)
+            wpid, status = os.waitpid(spawned_pid, 0)
+            if os.WIFEXITED(status):
+                child_returncode[0] = os.WEXITSTATUS(status)
+            elif os.WIFSIGNALED(status):
+                child_returncode[0] = 128 + os.WTERMSIG(status)
+        except (ProcessLookupError, ChildProcessError):
+            pass
+    if args.command:
+        sys.exit(child_returncode[0])
 
 
 if __name__ == "__main__":

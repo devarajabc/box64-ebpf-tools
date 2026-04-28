@@ -46,21 +46,38 @@ sudo make install
 
 ### 3. Pick a tool and run
 
+The fastest way: **spawn-and-trace mode** — pass your normal box64 command
+after `--` and the tracer launches it for you, attaches probes before any
+guest code runs, and auto-opens the browser dashboard. Stdio passes
+through and the tracer exits with the program's return code.
+
+```bash
+# Run a program under tracing — same args you'd normally pass to box64.
+sudo python3 box64_trace.py -- box64 ./game.exe
+
+# Or, if box64 is registered with binfmt_misc, just exec the x86_64 binary.
+sudo python3 box64_trace.py -- ./game.exe
+
+# Pass --no-web to skip the dashboard.
+sudo python3 box64_trace.py --no-web -- box64 ./game.exe
+```
+
+Or attach to an already-running session:
+
 ```bash
 # Find leaks in Box64's customMalloc/customFree allocator.
 sudo python3 box64_memleak.py -p <PID>
 
-# Profile across all running box64 processes (JIT churn, per-PID memory,
-# fork/exec lifecycle, CoW). Designed for Steam sessions where many box64
-# instances run concurrently.
+# Profile across all running box64 processes — for Steam sessions where
+# many box64 instances run concurrently.
 sudo python3 box64_trace.py
 
-# Same, with a real-time browser dashboard auto-opened on :8642.
+# Same, with the browser dashboard.
 sudo python3 box64_trace.py --web
 ```
 
-Common flags: `-b BINARY` (default `/usr/local/bin/box64`),
-`-p PID` (`0` = all processes), `-i INTERVAL` (seconds).
+Common flags: `-b BINARY` (default `/usr/local/bin/box64`, falls back to
+`which box64`), `-p PID` (`0` = all processes), `-i INTERVAL` (seconds).
 Press **Ctrl+C** to stop and print the full report.
 
 ## Web dashboard

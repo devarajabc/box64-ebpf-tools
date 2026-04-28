@@ -682,6 +682,70 @@ def check_steam_sampling(box64_bin, test_bins):
     return ok, errors
 
 
+def check_spawn_mode(box64_bin, stress_bin, timeout=60):
+    """Test box64_trace.py spawn-and-trace mode end-to-end.
+
+    Runs `box64_trace.py --no-web -- <box64> <stress_bin>` directly: the
+    tracer should fork the child paused, attach probes, SIGCONT, wait for
+    the child to exit, print FINAL REPORT, and exit with the child's rc.
+    """
+    print("\n--- box64_trace.py (spawn mode) ---")
+
+    tool_path = os.path.join(REPO_ROOT, "box64_trace.py")
+    cmd = [sys.executable, "-u", tool_path, "-b", box64_bin, "-i", "60",
+           "--no-web", "--", box64_bin, stress_bin]
+
+    print(f"  Running: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  FAIL  spawn mode: timed out after {timeout}s")
+        return False, [f"spawn mode timed out after {timeout}s"]
+
+    stdout, stderr, rc = result.stdout, result.stderr, result.returncode
+    combined = stdout + "\n" + stderr
+    errors = []
+
+    if not check_no_tracebacks(combined, "spawn"):
+        errors.append("Python traceback in spawn-mode output")
+
+    # Required lines proving the spawn-mode flow ran end-to-end.
+    expectations = {
+        "Spawning:": "tracer announced the spawn",
+        "stopped — attaching probes": "child reached SIGSTOP gate",
+        "probes attached": "BPF probes attached after gate",
+        "Resumed child PID": "child SIGCONTed after probes",
+        "Child PID": "child exit detected (poll loop)",
+        "exited (rc=": "child return code captured",
+        "FINAL REPORT": "trace report still printed on exit",
+    }
+    for needle, what in expectations.items():
+        if needle in stdout:
+            print(f"  PASS  {what} ('{needle}')")
+        else:
+            errors.append(f"missing '{needle}' — {what}")
+            print(f"  FAIL  {what}: '{needle}' not in stdout")
+
+    # Exit code should match the spawned program's exit code. dynarec_stress
+    # exits 0 on success; we accept any non-128+signal, non-127 (exec fail).
+    if rc == 127:
+        errors.append("tracer exited 127 (exec failed)")
+        print(f"  FAIL  spawn exec failed (rc=127)")
+    elif rc >= 128:
+        errors.append(f"tracer exited {rc} — child terminated by signal "
+                      f"{rc - 128}")
+        print(f"  FAIL  child died from signal {rc - 128}")
+    else:
+        print(f"  PASS  tracer forwarded child rc ({rc})")
+
+    ok = not errors
+    if ok:
+        print(f"  PASS  box64_trace.py --web -- spawn mode (all assertions)")
+    return ok, errors
+
+
 def check_output_correctness(box64_bin, test_bins, test_dir):
     """Verify Box64 output matches upstream ref files while uprobes are attached.
 
@@ -892,6 +956,19 @@ def main():
     else:
         print("\n  SKIP  box64_trace.py: steam_lifecycle binary not found")
         print("  SKIP  box64_trace.py (PC sampling): steam_lifecycle binary not found")
+
+    # Spawn-and-trace mode (`-- COMMAND`). Uses dynarec_stress as a
+    # short-lived workload; the tracer should fork it paused, attach,
+    # resume, and exit with the child's rc.
+    if stress_bin:
+        ok, errs = check_spawn_mode(args.box64, stress_bin)
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+            errors.extend(errs)
+    else:
+        print("\n  SKIP  box64_trace.py (spawn mode): dynarec_stress not found")
 
     # Summary
     print(f"\n{'=' * 60}")
