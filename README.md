@@ -66,23 +66,38 @@ Press **Ctrl+C** to stop and print the full report.
 ## Web dashboard
 
 `box64_trace.py --web [PORT]` (default port 8642) starts a local-only
-HTTP server and opens the dashboard in your default browser. It surfaces
-everything the CLI prints, plus live updates and JIT cache-policy panels:
+HTTP server and opens the dashboard in your default browser.
 
-- **Header gauges** — total processes, custom-allocator bytes, JIT bytes,
-  mmap RSS, CoW pages, allocator churn rate, with anomaly coloring.
-- **Per-PID table** — sorted live, with the same memory breakdown the CLI
-  reports.
-- **Live event feed** — fork / exec / vfork / clone / large JIT alloc events
-  streamed over Server-Sent Events.
-- **Cache-policy panels** — log2 histograms of JIT alloc sizes and block
-  lifetimes, top churned x64 PCs, top outstanding blocks, and invalidation
-  KPIs (designed to inform a future JIT code-cache eviction policy).
+### What the dashboard shows
 
-Endpoints exposed by `box64_web.py`: `/api/snapshot`, `/api/history`,
-`/api/events` (SSE), `/api/stats-meta`. The frontend in `web/` is a
-~770-line vanilla-JS app derived from the MIT-licensed
-[kbox](https://github.com/devarajabc/kbox) observatory; see
+| Region | Panel | Information |
+|---|---|---|
+| Header | Gauges (4) | `allocs/s` (custom-allocator throughput), `JIT MB` (live JIT bytes), `forks`, `threads` — with anomaly coloring when values cross thresholds. |
+| Header | Guest / pause | Detected guest binary label; pause polling toggle. |
+| Time-series | Allocator | `malloc` / `free` calls, total bytes; trend chart over the last N snapshots. |
+| Time-series | JIT Blocks | `AllocDynarecMap` / `FreeDynarecMap` counts, outstanding live blocks. |
+| Time-series | Process Lifecycle | `fork` / `vfork` / `execve` events per interval. |
+| Time-series | JIT Protection | mprotect RW↔RX flips on JIT regions (overhead signal). |
+| Process | Per-Process Breakdown | Live table: PID, label, threads, JIT bytes, JIT allocs, malloc bytes, mmap bytes, contexts. |
+| Cache policy | Allocation Size Distribution | log2 histogram of `AllocDynarecMap` sizes — informs slab/arena sizing. |
+| Cache policy | Block Lifetime Distribution | log2 histogram of alloc→free deltas — informs TTL-based eviction. |
+| Cache policy | Invalidations | KPIs for `InvalidDynablock`, `MarkDynablock`, rapid-free churn count + chart. |
+| Cache policy | Top Churned x64 Addresses | Most-recompiled guest PCs — SMC / re-JIT pressure hot spots. |
+| Cache policy | Top Outstanding JIT Blocks | Largest live blocks (x64 addr, alloc addr, size, PID) — eviction candidates. |
+| Stream | Event Feed | Live fork / exec / vfork / clone / large-alloc events streamed via Server-Sent Events. |
+
+### HTTP endpoints (served by `box64_web.py`)
+
+| Path | Returns |
+|---|---|
+| `/` | Dashboard HTML + static assets from `web/`. |
+| `/api/snapshot` | Current stats — gauges, per-PID table, histograms, top-N tables. Polled every ~1 s. |
+| `/api/history` | Recent snapshots for chart backfill on initial page load. |
+| `/api/events` | Server-Sent Events stream of fork / exec / JIT events. |
+| `/api/stats-meta` | Field metadata (units, scale hints) consumed by the frontend. |
+
+The frontend in `web/` is a ~770-line vanilla-JS app derived from the
+MIT-licensed [kbox](https://github.com/devarajabc/kbox) observatory; see
 [`web/LICENSE-kbox`](web/LICENSE-kbox) for the upstream license.
 
 ## Project layout
