@@ -8,7 +8,16 @@ PREFIX="${PREFIX:-/usr/local}"
 BINDIR="$PREFIX/bin"
 LIBDIR="$PREFIX/lib/box64-ebpf-tools"
 
-if [ "$(id -u)" -eq 0 ] || { [ -e "$PREFIX" ] && [ -w "$PREFIX" ]; }; then
+# Nothing to do if we never installed under this PREFIX. Avoids prompting
+# for sudo just to `rm -rf` files that don't exist.
+if [ ! -e "$LIBDIR" ] && [ ! -e "$BINDIR/box64_trace" ] \
+   && [ ! -e "$BINDIR/box64_memleak" ]; then
+    echo "Nothing to remove under $PREFIX (no install detected)."
+    exit 0
+fi
+
+# Sudo only when at least one target file is owned by someone else.
+if [ "$(id -u)" -eq 0 ] || { [ -e "$LIBDIR" ] && [ -w "$LIBDIR" ]; }; then
     SUDO=""
 elif command -v sudo >/dev/null 2>&1; then
     SUDO="sudo"

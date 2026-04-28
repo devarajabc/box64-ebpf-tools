@@ -15,26 +15,31 @@ correlation, and output formatting.
 
 ## Getting Started
 
-### 1. Install BCC
-
 ```bash
-# Debian/Ubuntu/Raspberry Pi OS
-sudo apt install python3-bcc bpfcc-tools
-
-# Fedora
-sudo dnf install python3-bcc bcc-tools
-
-# Arch Linux / Manjaro ARM
-sudo pacman -S python-bcc bcc-tools
-
-# openSUSE
-sudo zypper install python3-bcc bcc-tools
+./install.sh                       # system-wide (uses sudo for /usr/local)
+PREFIX=$HOME/.local ./install.sh   # user-local
+sudo ./install.sh -y               # unattended (CI)
 ```
 
-### 2. Build Box64 with debug symbols
+That's it for setup. The installer auto-detects your distro
+(`/etc/os-release`) and:
 
-The tools attach to Box64's internal functions by name, so the binary
-**must** have debug symbols and must not be stripped:
+1. **Installs `python3-bcc`** if it's missing — apt / dnf / pacman / zypper,
+   covering Debian, Ubuntu, Pop!_OS, Mint, Raspberry Pi OS, Fedora, RHEL,
+   Rocky, AlmaLinux, Arch, Manjaro, EndeavourOS, openSUSE, SLES.
+2. **Verifies `box64`** is on `$PATH` and was built with debug symbols
+   (looks for the `customMalloc` symbol in `nm` output, since uprobes
+   attach by name and a stripped binary will silently fail).
+3. **Installs the tools** — Python sources + `web/` frontend into
+   `$PREFIX/lib/box64-ebpf-tools/` and shell wrappers into `$PREFIX/bin/`,
+   so `box64_trace` and `box64_memleak` work from anywhere.
+
+Skip flags: `--no-bcc`, `--no-box64-check`, `--skip-deps` (both). Remove
+with `./uninstall.sh` (honors the same `$PREFIX`).
+
+### Don't have Box64 yet?
+
+Build it from source — the tools require debug symbols, so don't strip:
 
 ```bash
 git clone https://github.com/ptitSeb/box64.git
@@ -44,70 +49,35 @@ make -j$(nproc)
 sudo make install
 ```
 
-### 3. (optional) Install on `$PATH`
+Then re-run `./install.sh`.
 
-`./install.sh` does three things in order — each can be skipped with a
-flag if you want to drive it yourself:
+### Run a tool
 
-1. **Detects the distro** (`/etc/os-release`) and installs `python3-bcc`
-   via the right package manager (apt / dnf / pacman / zypper) — but only
-   if `import bcc` doesn't already work. Skip with `--no-bcc`.
-2. **Verifies box64** is on `$PATH` and built with debug symbols
-   (`customMalloc` exported). Tells you how to rebuild if not. Skip with
-   `--no-box64-check`.
-3. **Installs the tools** — Python sources + `web/` frontend into
-   `$PREFIX/lib/box64-ebpf-tools/` and shell wrappers into `$PREFIX/bin/`.
+The fastest path: **spawn-and-trace mode** — pass your normal box64
+command after `--` and the tracer launches it for you, attaches probes
+before any guest code runs, and auto-opens the browser dashboard. Stdio
+passes through and the tracer exits with the program's return code.
 
 ```bash
-# Interactive system-wide install (default PREFIX=/usr/local).
-./install.sh
-
-# Unattended (CI, sudo).
-sudo ./install.sh -y
-
-# User-local — make sure ~/.local/bin is on your sudo PATH.
-PREFIX=$HOME/.local ./install.sh
-
-# Just install the tools, don't touch BCC or box64.
-./install.sh --skip-deps
-
-# Remove later with the same PREFIX.
-./uninstall.sh
-```
-
-After install, the tools are bare commands instead of
-`python3 box64_trace.py`.
-
-### 4. Pick a tool and run
-
-The fastest way: **spawn-and-trace mode** — pass your normal box64 command
-after `--` and the tracer launches it for you, attaches probes before any
-guest code runs, and auto-opens the browser dashboard. Stdio passes
-through and the tracer exits with the program's return code.
-
-```bash
-# Installed:
 sudo box64_trace -- box64 ./game.exe
-sudo box64_trace -- ./game.exe         # via binfmt_misc
+sudo box64_trace -- ./game.exe              # binfmt_misc routes through box64
 sudo box64_trace --no-web -- box64 ./game.exe
-
-# Or run from the repo without installing:
-sudo python3 box64_trace.py -- box64 ./game.exe
 ```
 
 Or attach to an already-running session:
 
 ```bash
 # Find leaks in Box64's customMalloc/customFree allocator.
-sudo box64_memleak -p <PID>            # or: sudo python3 box64_memleak.py -p <PID>
+sudo box64_memleak -p <PID>
 
-# Profile across all running box64 processes — for Steam sessions where
-# many box64 instances run concurrently.
-sudo box64_trace                       # or: sudo python3 box64_trace.py
-
-# Same, with the browser dashboard.
-sudo box64_trace --web
+# Profile across all running box64 processes — Steam sessions where many
+# box64 instances run concurrently.
+sudo box64_trace
+sudo box64_trace --web                      # with the dashboard
 ```
+
+You can also run from the repo without installing
+(`sudo python3 box64_trace.py …`).
 
 Common flags: `-b BINARY` (default `/usr/local/bin/box64`, falls back to
 `which box64`), `-p PID` (`0` = all processes), `-i INTERVAL` (seconds).
@@ -155,14 +125,18 @@ MIT-licensed [kbox](https://github.com/devarajabc/kbox) observatory; see
 ```
 box64_common.py        ~270 lines    shared helpers (table below)
 box64_memleak.py      ~1180 lines    custom-allocator leak detector
-box64_trace.py        ~3190 lines    multi-process tracer: JIT, fork/exec, memory, CoW, --web
+box64_trace.py        ~3330 lines    multi-process tracer + spawn mode + --web
 box64_web.py           ~210 lines    HTTP+SSE backend for the dashboard
 web/                                 dashboard frontend (HTML/CSS/JS, MIT — see web/LICENSE-kbox)
+install.sh             ~270 lines    distro-aware installer (BCC + box64 + tools)
+uninstall.sh            ~30 lines    symmetric removal
 
-tests/                               223 unit tests + 3 upstream-compat tests
+tests/                               266 unit tests + 3 upstream-compat tests + live e2e
   conftest.py                        mocks `bcc` so the unit suite runs without it
+  test_spawn_mode.py                 fork/SIGSTOP gate + binary-resolver tests
+  test_install_sh.py                 installer round-trip + distro mapping
   test_*.py                          fast pure-Python checks (no root, no BCC)
-  test_ebpf_integration.py          E2E: runs each tool against live box64 workloads
+  test_ebpf_integration.py           E2E: runs each tool against live box64 workloads
   test_upstream_compat.py            verifies probed symbols & dynablock_t layout vs. box64 source
   dynarec_stress.c                   stress workload for the JIT probes
   memleak_leaker.c                   deliberately leaks via _exit(0) for memleak E2E
@@ -170,6 +144,9 @@ tests/                               223 unit tests + 3 upstream-compat tests
 
 docs/                                per-tool reference + architecture notes
 ```
+
+The code-review-graph reports 44 files, 474 nodes, 5117 edges across
+Python, C, JavaScript, and bash.
 
 Helpers in `box64_common.py`, grouped:
 
@@ -221,7 +198,9 @@ values persist in the uprobe inode cache. Particularly relevant on
 ```bash
 pip install -r requirements-dev.txt
 
-# Fast unit tests (no root, no BCC required — conftest.py mocks it).
+# 266 fast unit tests (no root, no BCC required — conftest.py mocks it).
+# Includes test_spawn_mode.py (real fork+SIGSTOP gate) and
+# test_install_sh.py (round-trip install/uninstall in a tmpdir).
 pytest tests/ --tb=short \
     --ignore=tests/test_upstream_compat.py \
     --ignore=tests/test_ebpf_integration.py
