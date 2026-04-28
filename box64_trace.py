@@ -1499,9 +1499,10 @@ def parse_args():
                     "fork/exec lifecycle, per-PID memory, DynaRec JIT, "
                     "mmap, and pressure-vessel detection using eBPF uprobes",
         epilog="Spawn-and-trace: append `-- COMMAND ARGS...` to launch a "
-               "program under tracing (e.g. `-- box64 ./game.exe`). The "
-               "browser dashboard auto-opens; trace exits with COMMAND's "
-               "return code.")
+               "program under tracing (e.g. `-- box64 game.exe` or just "
+               "`-- game.exe` with binfmt_misc; bare names are auto-"
+               "resolved against cwd like box64 itself does). The browser "
+               "dashboard auto-opens; trace exits with COMMAND's rc.")
     p.add_argument("-b", "--binary", default="/usr/local/bin/box64",
                    help="Path to box64 binary (default: /usr/local/bin/box64; "
                         "falls back to `which box64` if missing)")
@@ -1642,7 +1643,8 @@ def _validate_spawn_command(cmd):
     if not cmd:
         return ("error",
                 ("no command given after `--`",
-                 "pass a program to spawn, e.g. `-- box64 ./game.exe`"))
+                 "pass a program to spawn, e.g. `-- box64 game.exe` or "
+                 "just `-- game.exe` (with binfmt_misc)."))
     import shutil
     name = cmd[0]
     # Path-like name (contains a separator): exec resolves it as a path.

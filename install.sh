@@ -311,7 +311,8 @@ EOF
     echo "Installed: $BINDIR/box64_trace, $BINDIR/box64_memleak"
     echo
     echo "Quick start (eBPF needs root):"
-    echo "  sudo box64_trace -- box64 ./game.exe"
+    echo "  sudo box64_trace -- box64 game.exe       # bare name auto-resolves to ./"
+    echo "  sudo box64_trace -- game.exe             # binfmt_misc routes through box64"
     echo "  sudo box64_memleak -p \$(pgrep -n box64)"
 }
 
