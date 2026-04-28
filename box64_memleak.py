@@ -18,15 +18,28 @@ import subprocess
 import sys
 import time
 
-try:
-    from bcc import BPF
-except ImportError:
-    print("ERROR: python3-bcc (BCC toolkit) is required. Install it with:")
-    print("  sudo apt install python3-bcc bpfcc-tools  # Debian/Ubuntu/Raspberry Pi OS")
-    print("  sudo dnf install python3-bcc bcc-tools     # Fedora")
-    print("  sudo pacman -S python-bcc bcc-tools        # Arch Linux / Manjaro ARM")
-    print("  sudo zypper install python3-bcc bcc-tools  # openSUSE")
-    sys.exit(1)
+# BCC is imported lazily inside main() so `--help` works on hosts without
+# it. Kept as a module-level name (initially None) so tests can monkeypatch
+# `box64_memleak.BPF` to a mock before calling main().
+BPF = None
+
+
+def _import_bcc():
+    """Populate the module-level BPF if not already set; return it."""
+    global BPF
+    if BPF is not None:
+        return BPF
+    try:
+        from bcc import BPF as _BPF
+        BPF = _BPF
+        return BPF
+    except ImportError:
+        print("ERROR: python3-bcc (BCC toolkit) is required. Install it with:")
+        print("  sudo apt install python3-bcc bpfcc-tools  # Debian/Ubuntu/Raspberry Pi OS")
+        print("  sudo dnf install python3-bcc bcc-tools     # Fedora")
+        print("  sudo pacman -S python-bcc bcc-tools        # Arch Linux / Manjaro ARM")
+        print("  sudo zypper install python3-bcc bcc-tools  # openSUSE")
+        sys.exit(1)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -689,6 +702,7 @@ def compute_size_histogram(sizes):
 
 def main():
     args = parse_args()
+    _import_bcc()  # populates module-level BPF
     binary = args.binary
 
     # Validate binary
