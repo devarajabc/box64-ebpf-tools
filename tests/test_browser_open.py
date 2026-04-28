@@ -521,3 +521,307 @@ class TestFirefoxIsRunning:
                      "exe": "/usr/local/bin/decoy"},
         })
         assert box64_web._firefox_is_running() is False
+
+
+# ---------------------------------------------------------------------------
+# Realistic (pref × sudo × firefox-running × session-env) matrix.
+# These exercise the actual command lines `box64_trace --web` users hit:
+# under sudo with various browser preferences and firefox availability.
+# ---------------------------------------------------------------------------
+
+
+def _split_env_and_cmd(argv, sudo_user):
+    """Split a sudo'd argv into (env_pairs, cmd_argv).
+
+    Expected forms (any of):
+      [..., 'sudo', '-u', user, cmd, ...]
+      [..., 'sudo', '-u', user, 'env', K=V, ..., cmd, ...]
+    """
+    assert argv[:3] == ["sudo", "-u", sudo_user]
+    if len(argv) >= 4 and argv[3] == "env":
+        env_pairs = []
+        i = 4
+        while i < len(argv) and "=" in argv[i] and not argv[i].startswith("--"):
+            env_pairs.append(argv[i])
+            i += 1
+        return env_pairs, argv[i:]
+    return [], argv[3:]
+
+
+class TestSudoMatrix:
+    """The realistic (pref × sudo × firefox-running × session-env) matrix
+    that real `box64_trace --web` invocations hit."""
+
+    SESSION_ENV = {
+        "DISPLAY": ":0",
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+    }
+
+    @pytest.fixture
+    def under_sudo(self, monkeypatch):
+        monkeypatch.setenv("SUDO_USER", "alice")
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+        monkeypatch.delenv("BROWSER", raising=False)
+        monkeypatch.setattr(box64_web, "_user_session_env",
+                            lambda u: dict(self.SESSION_ENV))
+
+    def test_none_under_sudo_still_skips_no_spawn(
+            self, fake_popen, under_sudo):
+        opened, detail = box64_web._open_browser(URL, "none")
+        assert opened is False
+        assert "skip" in detail.lower()
+        assert fake_popen == []  # no spawn, even with SUDO_USER set
+
+    def test_chromium_under_sudo_with_session_env(
+            self, fake_popen, under_sudo):
+        # The env shim must apply to non-Firefox browsers too — they
+        # equally need DISPLAY/DBus to reach the user's session.
+        opened, _ = box64_web._open_browser(URL, "chromium")
+        assert opened is True
+        env_pairs, cmd = _split_env_and_cmd(fake_popen[0], "alice")
+        assert sorted(env_pairs) == sorted(
+            f"{k}={v}" for k, v in self.SESSION_ENV.items())
+        # Chromium does NOT receive --new-tab.
+        assert cmd == ["chromium", URL]
+
+    def test_auto_sudo_firefox_running_full_pipeline(
+            self, fake_popen, under_sudo, monkeypatch):
+        # The most common path: user has Firefox open, runs
+        # `sudo box64_trace --web` (no --browser), tracer auto-resolves
+        # to firefox --new-tab via _firefox_is_running()=True.
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(box64_web, "_firefox_is_running", lambda: True)
+        opened, _ = box64_web._open_browser(URL, "auto")
+        assert opened is True
+        env_pairs, cmd = _split_env_and_cmd(fake_popen[0], "alice")
+        assert sorted(env_pairs) == sorted(
+            f"{k}={v}" for k, v in self.SESSION_ENV.items())
+        assert cmd == ["firefox", "--new-tab", URL]
+
+    def test_auto_sudo_no_firefox_falls_to_xdg_open_with_env_shim(
+            self, fake_popen, under_sudo, monkeypatch):
+        # No Firefox running, so auto resolves to xdg-open. The env
+        # shim still applies — xdg-open also needs DISPLAY/DBus to
+        # consult the user's preferred-browser MIME settings.
+        monkeypatch.setattr("shutil.which",
+                            lambda name: "/usr/bin/xdg-open" if name == "xdg-open" else None)
+        monkeypatch.setattr(box64_web, "_firefox_is_running", lambda: False)
+        opened, _ = box64_web._open_browser(URL, "auto")
+        assert opened is True
+        env_pairs, cmd = _split_env_and_cmd(fake_popen[0], "alice")
+        assert sorted(env_pairs) == sorted(
+            f"{k}={v}" for k, v in self.SESSION_ENV.items())
+        assert cmd == ["xdg-open", URL]
+
+    def test_browser_colon_list_under_sudo_first_fails_second_wins(
+            self, monkeypatch, under_sudo):
+        # $BROWSER='missing-browser:firefox' under sudo: first attempt
+        # raises FileNotFoundError, second succeeds with the env shim
+        # AND --new-tab injected.
+        monkeypatch.setenv("BROWSER", "missing-browser:firefox")
+        attempts = []
+
+        import subprocess as _sp
+
+        def _selective(argv, **kwargs):
+            attempts.append(list(argv))
+            cmd = argv[-1] if not argv[-1].startswith("http") else argv[-2]
+            if "missing-browser" in argv:
+                raise FileNotFoundError("missing-browser")
+            return type("_Stub", (), {})()
+
+        monkeypatch.setattr(_sp, "Popen", _selective)
+        opened, _ = box64_web._open_browser(URL, "auto")
+        assert opened is True
+
+        # First attempt: tried missing-browser (with sudo+env shim).
+        env_pairs1, cmd1 = _split_env_and_cmd(attempts[0], "alice")
+        assert sorted(env_pairs1) == sorted(
+            f"{k}={v}" for k, v in self.SESSION_ENV.items())
+        assert cmd1 == ["missing-browser", URL]
+
+        # Second attempt: firefox with --new-tab (and sudo+env shim).
+        env_pairs2, cmd2 = _split_env_and_cmd(attempts[1], "alice")
+        assert sorted(env_pairs2) == sorted(
+            f"{k}={v}" for k, v in self.SESSION_ENV.items())
+        assert cmd2 == ["firefox", "--new-tab", URL]
+
+
+# ---------------------------------------------------------------------------
+# `_user_session_env` robustness — real /proc is messy, so make sure
+# the scanner gracefully handles partial data, malformed entries, and
+# the special characters that show up in DBus addresses.
+# ---------------------------------------------------------------------------
+
+
+class TestUserSessionEnvRobustness:
+    @pytest.fixture(autouse=True)
+    def _alice(self, monkeypatch):
+        import pwd
+
+        class _Pw:
+            pw_uid = 1000
+        monkeypatch.setattr(pwd, "getpwnam", lambda name: _Pw)
+
+    def _stub_proc(self, monkeypatch, environs):
+        """environs: dict pid_str -> bytes (or Exception subclass to raise).
+
+        All listed pids are owned by uid 1000. Stubs os.listdir + os.stat
+        + builtins.open, falling through to the real implementations for
+        non-/proc paths.
+        """
+        from io import BytesIO
+
+        monkeypatch.setattr(os, "listdir",
+                            lambda p: list(environs.keys()) if p == "/proc" else [])
+
+        real_stat = os.stat
+
+        class _Stat:
+            st_uid = 1000
+
+        def fake_stat(path, *a, **kw):
+            if any(str(path) == f"/proc/{pid}" for pid in environs):
+                return _Stat()
+            return real_stat(path, *a, **kw)
+        monkeypatch.setattr(os, "stat", fake_stat)
+
+        real_open = open
+
+        def fake_open(path, mode="r", *a, **kw):
+            for pid, val in environs.items():
+                if path == f"/proc/{pid}/environ":
+                    if isinstance(val, type) and issubclass(val, OSError):
+                        raise val("simulated")
+                    return BytesIO(val)
+            return real_open(path, mode, *a, **kw)
+
+        import builtins
+        monkeypatch.setattr(builtins, "open", fake_open)
+
+    def test_skips_process_with_unreadable_environ(self, monkeypatch):
+        # Process 1111 vanished mid-scan (environ raises OSError); 2222
+        # still has the data. Scanner must skip 1111 and continue.
+        self._stub_proc(monkeypatch, {
+            "1111": OSError,  # raises on open
+            "2222": b"DISPLAY=:0\x00",
+        })
+        env = box64_web._user_session_env("alice")
+        assert env == {"DISPLAY": ":0"}
+
+    def test_ignores_malformed_environ_entries(self, monkeypatch):
+        # Mix of valid K=V, bare tokens (no '='), and a binary blob.
+        # Only the well-formed entries with keys in _SESSION_ENV_KEYS
+        # are picked up.
+        self._stub_proc(monkeypatch, {
+            "3000": (b"DISPLAY=:0\x00"
+                     b"NO_EQUALS_HERE\x00"
+                     b"\xff\xfe\xfd\x00"
+                     b"HOME=/home/alice\x00"),
+        })
+        env = box64_web._user_session_env("alice")
+        assert env == {"DISPLAY": ":0", "HOME": "/home/alice"}
+
+    def test_preserves_value_containing_equals_sign(self, monkeypatch):
+        # The DBus address has multiple '=' characters; we must only
+        # split on the FIRST one, so the value is preserved verbatim.
+        addr = "unix:path=/run/user/1000/bus,guid=abc123def456"
+        self._stub_proc(monkeypatch, {
+            "4000": f"DBUS_SESSION_BUS_ADDRESS={addr}\x00".encode(),
+        })
+        env = box64_web._user_session_env("alice")
+        assert env == {"DBUS_SESSION_BUS_ADDRESS": addr}
+
+    def test_walks_multiple_user_processes_to_fill_keys(self, monkeypatch):
+        # First process has only DISPLAY; second has WAYLAND_DISPLAY.
+        # The scanner must keep going across pids until all desired
+        # keys are filled (or we run out of pids).
+        self._stub_proc(monkeypatch, {
+            "5000": b"DISPLAY=:0\x00",
+            "5001": b"WAYLAND_DISPLAY=wayland-0\x00HOME=/home/alice\x00",
+        })
+        env = box64_web._user_session_env("alice")
+        assert env == {
+            "DISPLAY": ":0",
+            "WAYLAND_DISPLAY": "wayland-0",
+            "HOME": "/home/alice",
+        }
+
+    def test_accepts_empty_value_after_equals(self, monkeypatch):
+        # `WAYLAND_DISPLAY=` with empty value is legal; record it.
+        # (Empty here just means the user is purely on X11; we still
+        # carry the var through so the sudo'd browser sees the right
+        # state rather than inheriting whatever sudo had.)
+        self._stub_proc(monkeypatch, {
+            "6000": b"DISPLAY=:0\x00WAYLAND_DISPLAY=\x00",
+        })
+        env = box64_web._user_session_env("alice")
+        assert env == {"DISPLAY": ":0", "WAYLAND_DISPLAY": ""}
+
+
+# ---------------------------------------------------------------------------
+# `_firefox_is_running` robustness — sandboxed /proc, missing files,
+# readlink failures shouldn't crash or false-positive.
+# ---------------------------------------------------------------------------
+
+
+class TestFirefoxIsRunningRobustness:
+    def test_proc_unreadable_returns_false(self, monkeypatch):
+        # In a hardened/sandboxed environment, /proc may not be
+        # readable at all. The scanner must catch the OSError and
+        # return False, not propagate.
+        def _raise(_path):
+            raise OSError("permission denied")
+        monkeypatch.setattr(os, "listdir", _raise)
+        assert box64_web._firefox_is_running() is False
+
+    def test_pid_dir_without_comm_is_skipped(self, monkeypatch):
+        # PID directory exists but the comm file is missing (TOCTOU
+        # — process exited between listdir and open). Skip and
+        # continue to the next pid.
+        from io import BytesIO
+
+        monkeypatch.setattr(os, "listdir",
+                            lambda p: ["7000", "7001"] if p == "/proc" else [])
+
+        real_open = open
+
+        def fake_open(path, mode="r", *a, **kw):
+            if path == "/proc/7000/comm":
+                raise OSError("vanished")
+            if path == "/proc/7001/comm":
+                from io import StringIO
+                return StringIO("firefox\n")
+            if path == "/proc/7001/cmdline":
+                return BytesIO(b"/usr/bin/firefox\x00")
+            return real_open(path, mode, *a, **kw)
+
+        import builtins
+        monkeypatch.setattr(builtins, "open", fake_open)
+        # readlink not needed here; comm matches firefox directly.
+        monkeypatch.setattr(os, "readlink",
+                            lambda p: (_ for _ in ()).throw(OSError("never")))
+        assert box64_web._firefox_is_running() is True
+
+    def test_exe_readlink_failure_is_skipped(self, monkeypatch):
+        # comm doesn't match firefox-family, so the scanner falls back
+        # to /proc/<pid>/exe — but that readlink also fails. Must skip,
+        # not return True or crash.
+        from io import StringIO
+
+        monkeypatch.setattr(os, "listdir",
+                            lambda p: ["8000"] if p == "/proc" else [])
+
+        real_open = open
+
+        def fake_open(path, mode="r", *a, **kw):
+            if path == "/proc/8000/comm":
+                return StringIO("some-other-process\n")
+            return real_open(path, mode, *a, **kw)
+
+        import builtins
+        monkeypatch.setattr(builtins, "open", fake_open)
+        monkeypatch.setattr(os, "readlink",
+                            lambda p: (_ for _ in ()).throw(OSError("vanished")))
+        assert box64_web._firefox_is_running() is False

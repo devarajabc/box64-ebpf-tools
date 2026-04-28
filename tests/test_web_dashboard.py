@@ -156,6 +156,105 @@ def port_capsys(capsys):
 
 
 # ---------------------------------------------------------------------------
+# start() ↔ _open_browser integration. The browser-open helper is heavily
+# unit-tested in test_browser_open.py; here we just verify start() wires
+# the call correctly: passes the URL it published, forwards browser_pref
+# verbatim, and prints the right operator-log line for each outcome.
+# ---------------------------------------------------------------------------
+
+class TestStartCallsOpenBrowser:
+    def _capture_open_browser(self, monkeypatch, return_value):
+        """Replace _open_browser with a capturing stub. Returns the
+        captured-args list; the stub returns `return_value` on each call."""
+        captured = []
+
+        def _stub(url, pref):
+            captured.append((url, pref))
+            return return_value
+
+        monkeypatch.setattr(box64_web, "_open_browser", _stub)
+        return captured
+
+    def test_passes_actual_url_and_pref_to_open_browser(
+            self, monkeypatch, capsys):
+        captured = self._capture_open_browser(
+            monkeypatch, (True, "launched stub"))
+
+        port = _free_port()
+        server = box64_web.start(port, _fake_snapshot, _fake_stats,
+                                 browser_pref="firefox")
+        try:
+            assert len(captured) == 1
+            url, pref = captured[0]
+            assert url == f"http://127.0.0.1:{port}/"
+            assert pref == "firefox"
+        finally:
+            box64_web.shutdown(server)
+
+    def test_logs_auto_opened_on_success(self, monkeypatch, capsys):
+        self._capture_open_browser(
+            monkeypatch, (True, "launched 'firefox --new-tab'"))
+
+        port = _free_port()
+        server = box64_web.start(port, _fake_snapshot, _fake_stats,
+                                 browser_pref="firefox")
+        try:
+            out = capsys.readouterr().out
+            assert "Auto-opened:" in out
+            assert "launched 'firefox --new-tab'" in out
+            # The fallback "→ open the URL above" line must NOT appear
+            # when auto-open succeeded.
+            assert "open the URL above" not in out
+        finally:
+            box64_web.shutdown(server)
+
+    def test_logs_fallback_on_auto_open_failure(self, monkeypatch, capsys):
+        self._capture_open_browser(
+            monkeypatch, (False, "no browser launcher worked"))
+
+        port = _free_port()
+        server = box64_web.start(port, _fake_snapshot, _fake_stats,
+                                 browser_pref="auto")
+        try:
+            out = capsys.readouterr().out
+            # Failure prints the detail under "Auto-open:" (no "ed")
+            # AND the explicit copy-paste guidance line.
+            assert "Auto-open:" in out
+            assert "no browser launcher worked" in out
+            assert "open the URL above" in out
+        finally:
+            box64_web.shutdown(server)
+
+    def test_url_uses_actual_port_after_scan(self, monkeypatch, capsys):
+        # If the preferred port is busy, start() scans upward. The URL
+        # passed to _open_browser must reflect the *actual* bound port,
+        # not the one we asked for. Regression for the same flavor of
+        # mistake that hit _self_test in obs #356.
+        captured = self._capture_open_browser(
+            monkeypatch, (True, "launched stub"))
+
+        preferred = _free_port()
+        holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        holder.bind(("127.0.0.1", preferred))
+        holder.listen(1)
+        try:
+            server = box64_web.start(preferred, _fake_snapshot, _fake_stats,
+                                     browser_pref="firefox")
+        except Exception:
+            holder.close()
+            raise
+        try:
+            actual = server.server_address[1]
+            assert actual != preferred  # scan did happen
+            url, _pref = captured[0]
+            assert url == f"http://127.0.0.1:{actual}/"
+            assert str(preferred) not in url  # no stale-port leak
+        finally:
+            box64_web.shutdown(server)
+            holder.close()
+
+
+# ---------------------------------------------------------------------------
 # Every endpoint the frontend depends on
 # ---------------------------------------------------------------------------
 
