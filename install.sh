@@ -171,6 +171,112 @@ install_bcc() {
     fi
 }
 
+# Per-distro kernel-headers package picker. Returns "<pm>:<pkgs>" or "".
+# BCC compiles BPF programs at runtime via clang, so it needs *running-
+# kernel* headers — generic linux-libc-dev is not enough.
+headers_install_spec() {
+    local ids="$1"
+    local uname_r="$2"
+    case " $ids " in
+        *" raspbian "*)
+            # Raspberry Pi OS (Debian-based): the meta-package tracks the
+            # currently-installed kernel automatically.
+            echo "apt:raspberrypi-kernel-headers" ;;
+        *" ubuntu "*|*" debian "*|*" pop "*|*" linuxmint "*)
+            # Generic Debian/Ubuntu (incl. Ubuntu's raspi flavor):
+            # linux-headers-$(uname -r) resolves to the matching package
+            # — `linux-headers-6.8.0-1052-raspi` for Ubuntu on a Pi,
+            # `linux-headers-6.8.0-58-generic` on x86 Ubuntu, etc.
+            echo "apt:linux-headers-$uname_r" ;;
+        *" fedora "*|*" rhel "*|*" centos "*|*" rocky "*|*" almalinux "*)
+            echo "dnf:kernel-devel-$uname_r" ;;
+        *" arch "*|*" manjaro "*|*" endeavouros "*|*" arch-arm "*)
+            # Arch family: linux-headers tracks the running kernel
+            # package. Pi-Arch users may need linux-rpi-headers — we
+            # try the generic one and let the user adjust if needed.
+            echo "pacman:linux-headers" ;;
+        *" opensuse"*|*" sles "*|*" suse "*)
+            echo "zypper:kernel-devel" ;;
+        *) echo "" ;;
+    esac
+}
+
+# BCC needs running-kernel headers to compile BPF programs at JIT time.
+# Without them, every box64_trace / box64_memleak invocation dies with
+# "modprobe: FATAL: Module kheaders not found / chdir(/lib/modules/.../
+# build): No such file or directory". This check makes the installer
+# surface and fix that *before* the user hits it at runtime.
+check_kernel_headers() {
+    local uname_r build_dir
+    uname_r="$(uname -r)"
+    build_dir="/lib/modules/$uname_r/build"
+
+    # Path 1: real /lib/modules/<ver>/build symlink with a Makefile.
+    # This is the path BCC uses by default.
+    if [ -d "$build_dir" ] && [ -f "$build_dir/Makefile" ]; then
+        echo "[deps] kernel headers: present at $build_dir"
+        return 0
+    fi
+
+    # Path 2: kheaders.ko already loaded → /sys/kernel/kheaders.tar.xz.
+    # BCC will fall back to extracting from this archive when build/
+    # is missing. This is what CONFIG_IKHEADERS=y unlocks.
+    if [ -f /sys/kernel/kheaders.tar.xz ]; then
+        echo "[deps] kernel headers: available via /sys/kernel/kheaders.tar.xz"
+        return 0
+    fi
+
+    # Path 3: kheaders.ko exists but isn't loaded. Try modprobe.
+    if modinfo kheaders >/dev/null 2>&1; then
+        if $SUDO modprobe kheaders 2>/dev/null \
+           && [ -f /sys/kernel/kheaders.tar.xz ]; then
+            echo "[deps] kernel headers: loaded kheaders module, " \
+                 "/sys/kernel/kheaders.tar.xz now present"
+            return 0
+        fi
+    fi
+
+    # Nothing on the system; install per-distro.
+    local distro spec pm pkgs
+    distro="$(detect_distro)"
+    spec="$(headers_install_spec "$distro" "$uname_r")"
+    if [ -z "$spec" ]; then
+        echo "[deps] kernel headers missing for kernel '$uname_r', and I"
+        echo "       don't have a package mapping for this distro ($distro)."
+        echo "       Install kernel headers (or rebuild with"
+        echo "       CONFIG_IKHEADERS=m), then re-run."
+        if confirm "Continue anyway (BPF compilation WILL fail at runtime)?"; then
+            return 0
+        fi
+        exit 1
+    fi
+    pm="${spec%%:*}"
+    pkgs="${spec#*:}"
+
+    echo "[deps] kernel headers missing for '$uname_r'."
+    echo "       Plan: $SUDO $pm install $pkgs"
+    if ! confirm "Install kernel headers now?"; then
+        echo "[deps] skipped — BPF compilation will fail at runtime."
+        exit 1
+    fi
+
+    case "$pm" in
+        apt)     $SUDO apt-get install -y $pkgs ;;
+        dnf)     $SUDO dnf install -y $pkgs ;;
+        pacman)  $SUDO pacman -S --needed --noconfirm $pkgs ;;
+        zypper)  $SUDO zypper install -y $pkgs ;;
+        *)       echo "ERROR: don't know how to drive '$pm'"; exit 1 ;;
+    esac
+
+    if [ ! -d "$build_dir" ] || [ ! -f "$build_dir/Makefile" ]; then
+        echo "[deps] WARNING: $pm reports headers installed but $build_dir"
+        echo "       still missing. After a kernel update on raspi/Ubuntu, a"
+        echo "       reboot is sometimes needed so the running kernel matches"
+        echo "       the headers package. Or check 'apt list --installed |"
+        echo "       grep linux-headers' to see what landed."
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # 3. Pre-flight: confirm there's a way to auto-open the dashboard
 # ---------------------------------------------------------------------------
@@ -325,7 +431,12 @@ echo "box64-ebpf-tools installer"
 echo "  detected: $(detect_distro)"
 echo
 
-if [ "$SKIP_BCC" -eq 0 ]; then install_bcc; fi
+if [ "$SKIP_BCC" -eq 0 ]; then
+    install_bcc
+    # Kernel headers are a BCC runtime requirement, so gate them on
+    # the same flag that controls BCC.
+    check_kernel_headers
+fi
 if [ "$SKIP_BOX64" -eq 0 ]; then check_box64; fi
 if [ "$SKIP_BROWSER" -eq 0 ]; then check_browser; fi
 install_tools
