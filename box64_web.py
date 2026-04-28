@@ -193,11 +193,49 @@ def start(port, snapshot_fn, stats_fn, history_interval=3.0, host="127.0.0.1",
         t = threading.Thread(target=_history_loop, args=(history_interval,), daemon=True)
         t.start()
 
+    # Allow reuse — without this, restarting box64_trace within ~60s of a
+    # previous run fails with EADDRINUSE because the previous socket is
+    # still in TIME_WAIT. Browsers see the resulting bind failure as
+    # "page never loaded", which is the worst possible UX.
+    ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     url = f"http://{host}:{port}/"
+
+    # Self-test: verify the server actually responds before we hand the
+    # URL to the user. If `serve_forever` died on the daemon thread (or
+    # is still warming up after the close-wait reuse), surface that NOW
+    # rather than letting the user discover it via a hung browser tab.
+    import socket as _socket
+    deadline = time.monotonic() + 2.0
+    healthy = False
+    while time.monotonic() < deadline:
+        try:
+            s = _socket.create_connection((host, port), timeout=0.25)
+            s.sendall(b"GET / HTTP/1.0\r\n\r\n")
+            head = s.recv(64)
+            s.close()
+            if head.startswith(b"HTTP/1.") and b"200" in head[:32]:
+                healthy = True
+                break
+        except OSError:
+            pass
+        time.sleep(0.05)
+
+    if not healthy:
+        # Tear down what we built and raise so the caller can fall back
+        # to --no-web mode rather than print a URL that won't load.
+        try:
+            server.shutdown()
+            server.server_close()
+        except Exception:
+            pass
+        raise OSError(f"web server bound on {url} but did not respond to a "
+                      f"local self-test within 2 s — daemon thread likely "
+                      f"died on startup. Re-run with BOX64_TRACE_DEBUG=1 "
+                      f"for the traceback.")
 
     # Print the URL prominently so the user can always copy-paste it,
     # whatever happens with auto-open below.

@@ -1821,6 +1821,9 @@ def main():
         if args.web and not args.no_web:
             import socket
             probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # Match the real server: SO_REUSEADDR so a recently-killed
+            # tracer's TIME_WAIT socket doesn't make us false-positive.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 probe.bind(("127.0.0.1", args.web))
             except OSError as e:
