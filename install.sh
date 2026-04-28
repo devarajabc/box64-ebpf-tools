@@ -3,18 +3,26 @@
 # install missing dependencies.
 #
 # What this script does, in order:
-#   1. Detect the distro and (unless --skip-deps) install python3-bcc if
+#   1. Detect the distro (--no-bcc skips) and install python3-bcc if
 #      `import bcc` doesn't already work.
-#   2. Check that a `box64` binary exists on $PATH and was built with debug
-#      symbols (otherwise the uprobes have nothing to attach to).
-#   3. Copy the Python sources + web/ frontend into $PREFIX/lib/box64-ebpf-tools/
-#      and create thin shell wrappers in $PREFIX/bin/.
+#   2. Verify `box64` is on $PATH and was built with debug symbols
+#      (--no-box64-check skips). Without `customMalloc` exported by
+#      RelWithDebInfo, the uprobes have nothing to attach to.
+#   3. Detect a browser launcher for the --web dashboard's auto-open
+#      (--no-browser-check skips). Surfaces what `auto` mode will
+#      pick: $BROWSER, then any of firefox/chromium/google-chrome/
+#      brave/edge/vivaldi/opera/epiphany/falkon, then xdg-open. Warns
+#      (non-fatal) if nothing is found — --web always prints the URL
+#      so copy-paste still works.
+#   4. Copy the Python sources + web/ frontend into
+#      $PREFIX/lib/box64-ebpf-tools/ and emit thin shell wrappers in
+#      $PREFIX/bin/.
 #
 # Common usage:
-#   ./install.sh                    # interactive, system-wide
-#   sudo ./install.sh -y            # unattended, system-wide
-#   PREFIX=$HOME/.local ./install.sh   # user-local
-#   ./install.sh --skip-deps        # tools only, don't touch BCC / box64
+#   ./install.sh                          # interactive, system-wide
+#   sudo ./install.sh -y                  # unattended, system-wide
+#   PREFIX=$HOME/.local ./install.sh      # user-local
+#   ./install.sh --skip-deps              # tools only, no checks
 #
 # Flags:
 #   -y, --yes              assume yes to all prompts (for unattended / CI)
@@ -164,7 +172,7 @@ install_bcc() {
 }
 
 # ---------------------------------------------------------------------------
-# 2a. Pre-flight: confirm there's a way to auto-open the dashboard
+# 3. Pre-flight: confirm there's a way to auto-open the dashboard
 # ---------------------------------------------------------------------------
 
 check_browser() {
@@ -210,7 +218,7 @@ check_browser() {
 }
 
 # ---------------------------------------------------------------------------
-# 2b. Verify Box64 is built with debug symbols
+# 2. Verify Box64 is built with debug symbols
 # ---------------------------------------------------------------------------
 
 check_box64() {
@@ -253,7 +261,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# 3. Copy our Python + web/ assets and emit the wrapper scripts
+# 4. Copy our Python + web/ assets and emit the wrapper scripts
 # ---------------------------------------------------------------------------
 
 install_tools() {

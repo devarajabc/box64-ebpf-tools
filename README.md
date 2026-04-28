@@ -54,15 +54,37 @@ Then re-run `./install.sh`.
 ### Run a tool
 
 The fastest path: **spawn-and-trace mode** — pass your normal box64
-command after `--` and the tracer launches it for you, attaches probes
-before any guest code runs, and auto-opens the browser dashboard. Stdio
-passes through and the tracer exits with the program's return code.
+invocation after `--` and the tracer launches it for you, attaches
+probes before any guest code runs, and auto-opens the browser
+dashboard. Stdio passes through and the tracer exits with the
+program's return code.
 
 ```bash
-sudo box64_trace -- box64 ./game.exe
-sudo box64_trace -- ./game.exe              # binfmt_misc routes through box64
-sudo box64_trace --no-web -- box64 ./game.exe
+# All four of these work — pick whichever matches how you'd normally
+# invoke the program. Bare names are auto-resolved against cwd the same
+# way box64 does internally (BOX64_PATH always includes ./), so you
+# don't need to remember `./`.
+sudo box64_trace -- box64 ./game.exe                    # explicit
+sudo box64_trace -- ./game.exe                          # binfmt_misc → box64
+sudo box64_trace -- game.exe                            # auto ./ prepended
+sudo box64_trace -- box64 game.exe                      # also fine
 ```
+
+Behaviour when things go wrong:
+
+- **box64 crashes** (SIGSEGV/SIGABRT/SIGILL/etc.) → tracer prints the
+  signal name plus a `BOX64_DYNAREC=0` isolation hint and a pointer to
+  any `mono_crash.*.json` files. The dashboard *stays open* so you can
+  switch tabs and inspect what was happening at the moment of the crash;
+  Ctrl+C tears it down and exits with the child's rc.
+- **`exec` fails** (typo, missing file, not executable) → tracer bails
+  with rc=127 *before* attaching probes, so you don't waste 10 seconds
+  on BPF setup for a program that isn't there.
+- **Recognised BPF compile errors** (perm denied, missing kernel
+  headers, kernel ↔ BCC ABI skew, stripped box64) → one-line
+  diagnosis with the exact fix command.
+- **Unknown exception** → `[FATAL]` envelope with a pointer to the
+  issues URL; re-run with `BOX64_TRACE_DEBUG=1` for the full traceback.
 
 Or attach to an already-running session:
 
@@ -70,8 +92,8 @@ Or attach to an already-running session:
 # Find leaks in Box64's customMalloc/customFree allocator.
 sudo box64_memleak -p <PID>
 
-# Profile across all running box64 processes — Steam sessions where many
-# box64 instances run concurrently.
+# Profile across all running box64 processes — Steam sessions where
+# many box64 instances run concurrently.
 sudo box64_trace
 sudo box64_trace --web                      # with the dashboard
 ```
@@ -79,9 +101,11 @@ sudo box64_trace --web                      # with the dashboard
 You can also run from the repo without installing
 (`sudo python3 box64_trace.py …`).
 
-Common flags: `-b BINARY` (default `/usr/local/bin/box64`, falls back to
-`which box64`), `-p PID` (`0` = all processes), `-i INTERVAL` (seconds).
-Press **Ctrl+C** to stop and print the full report.
+Common flags: `-b BINARY` (default `/usr/local/bin/box64`, falls back
+to `which box64`), `-p PID` (`0` = all processes), `-i INTERVAL`
+(seconds), `--browser CMD` (`auto` / `none` / `firefox` / `chromium` /
+…), `--no-web` to skip the dashboard. Press **Ctrl+C** to stop and
+print the full report.
 
 ## Web dashboard
 
@@ -141,18 +165,21 @@ MIT-licensed [kbox](https://github.com/devarajabc/kbox) observatory; see
 ## Project layout
 
 ```
-box64_common.py        ~270 lines    shared helpers (table below)
-box64_memleak.py      ~1180 lines    custom-allocator leak detector
-box64_trace.py        ~3330 lines    multi-process tracer + spawn mode + --web
-box64_web.py           ~210 lines    HTTP+SSE backend for the dashboard
+box64_common.py        ~370 lines    shared helpers + diagnose_bpf_error / report_fatal
+box64_memleak.py      ~1210 lines    custom-allocator leak detector
+box64_trace.py        ~3550 lines    multi-process tracer + spawn mode + --web + crash handling
+box64_web.py           ~310 lines    HTTP+SSE backend + browser auto-open + shutdown
 web/                                 dashboard frontend (HTML/CSS/JS, MIT — see web/LICENSE-kbox)
-install.sh             ~270 lines    distro-aware installer (BCC + box64 + tools)
-uninstall.sh            ~30 lines    symmetric removal
+install.sh             ~330 lines    distro-aware installer (BCC + box64 + browser + tools)
+uninstall.sh            ~40 lines    symmetric removal
 
-tests/                               266 unit tests + 3 upstream-compat tests + live e2e
+tests/                               328 unit tests + 3 upstream-compat tests + live e2e
   conftest.py                        mocks `bcc` so the unit suite runs without it
-  test_spawn_mode.py                 fork/SIGSTOP gate + binary-resolver tests
-  test_install_sh.py                 installer round-trip + distro mapping
+  test_spawn_mode.py                 fork/SIGSTOP gate + binary-resolver + cmd validation
+  test_install_sh.py                 installer round-trip + distro + browser detection
+  test_crash_handling.py             child-exit message format + dashboard shutdown
+  test_browser_open.py               --browser flag + $BROWSER + xdg-open fallbacks
+  test_error_diagnosis.py            BPF/BCC error pattern matching + report_fatal
   test_*.py                          fast pure-Python checks (no root, no BCC)
   test_ebpf_integration.py           E2E: runs each tool against live box64 workloads
   test_upstream_compat.py            verifies probed symbols & dynablock_t layout vs. box64 source
@@ -163,8 +190,8 @@ tests/                               266 unit tests + 3 upstream-compat tests + 
 docs/                                per-tool reference + architecture notes
 ```
 
-The code-review-graph reports 44 files, 474 nodes, 5117 edges across
-Python, C, JavaScript, and bash.
+The code-review-graph reports 44 files across Python, C, JavaScript,
+and bash.
 
 Helpers in `box64_common.py`, grouped:
 
@@ -216,9 +243,9 @@ values persist in the uprobe inode cache. Particularly relevant on
 ```bash
 pip install -r requirements-dev.txt
 
-# 266 fast unit tests (no root, no BCC required — conftest.py mocks it).
-# Includes test_spawn_mode.py (real fork+SIGSTOP gate) and
-# test_install_sh.py (round-trip install/uninstall in a tmpdir).
+# 328 fast unit tests (no root, no BCC required — conftest.py mocks it).
+# Includes real fork+SIGSTOP gate tests, installer round-trip, browser
+# launcher mocks, BPF error diagnosis, and child-crash message formatting.
 pytest tests/ --tb=short \
     --ignore=tests/test_upstream_compat.py \
     --ignore=tests/test_ebpf_integration.py
