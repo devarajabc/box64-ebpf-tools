@@ -358,16 +358,42 @@ def shutdown(server):
         pass
 
 
+# Command names of the Firefox family. Used by `_browser_argv` to
+# decide when to inject `--new-tab` (which delegates to a running
+# instance via Firefox's remote-control protocol instead of starting
+# a fresh process that would fight the profile lock).
+_FIREFOX_CMDS = frozenset({
+    "firefox", "firefox-bin", "firefox-esr",
+    "firefox-developer-edition", "firefox-nightly",
+})
+
+
+def _browser_argv(cmd, url):
+    """Argv for launching `cmd` to open `url`.
+
+    For Firefox-family commands, prepend `--new-tab` so the URL is
+    routed to an already-running Firefox over the remote-control
+    protocol. This avoids the "Firefox is already running, but is not
+    responding" profile-lock dialog and is a no-op when Firefox is
+    not running (Firefox just starts and opens the URL in a new tab).
+    """
+    base = os.path.basename(cmd)
+    if base in _FIREFOX_CMDS:
+        return [cmd, "--new-tab", url]
+    return [cmd, url]
+
+
 def _firefox_is_running():
     """
-    Best-effort: True iff a process whose comm is firefox/firefox-bin
-    /firefox-esr is currently alive on this system.
+    Best-effort: True iff a Firefox-family process is currently alive
+    on this system.
 
     /proc-based scan, no pgrep dependency. Used by the auto-open
     resolver to decide between `firefox --new-tab` (talks to existing
     instance, no profile-lock collision) and `xdg-open` (which would
     spawn a fresh firefox and trigger the "already running but not
-    responding" dialog).
+    responding" dialog). Catches Snap and Flatpak builds via the
+    /proc/<pid>/exe symlink, which other comm-only checks miss.
     """
     try:
         for entry in os.listdir("/proc"):
@@ -378,17 +404,29 @@ def _firefox_is_running():
                     comm = f.read().strip()
             except OSError:
                 continue
-            if comm in ("firefox", "firefox-bin", "firefox-esr",
-                        "MainThread"):  # MainThread: Firefox renames its main thread
-                # Confirm with cmdline so we don't false-positive on
-                # an unrelated process literally named "firefox".
+            looks_firefoxy = (
+                comm.startswith("firefox")
+                or comm == "MainThread"  # Firefox renames its main thread
+            )
+            if not looks_firefoxy:
+                # Last resort: the exe symlink. Snap and Flatpak runtimes
+                # land under /snap/firefox/... or /var/lib/flatpak/... where
+                # the comm shows as the wrapper, not "firefox".
                 try:
-                    with open(f"/proc/{entry}/cmdline", "rb") as f:
-                        cmd = f.read()
-                    if b"firefox" in cmd:
-                        return True
+                    exe = os.readlink(f"/proc/{entry}/exe")
                 except OSError:
                     continue
+                if "/firefox" not in exe:
+                    continue
+            # Confirm with cmdline so we don't false-positive on an
+            # unrelated process literally named "firefox".
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as f:
+                    cmd = f.read()
+                if b"firefox" in cmd:
+                    return True
+            except OSError:
+                continue
     except OSError:
         pass
     return False
@@ -436,15 +474,17 @@ def _open_browser(url, pref="auto"):
             return False
 
     if pref != "auto":
-        # User specified a browser command directly.
-        if _spawn([pref, url]):
+        # User specified a browser command directly. Firefox-family
+        # commands get `--new-tab` injected so we don't hit the profile
+        # lock on a system that already has Firefox open.
+        if _spawn(_browser_argv(pref, url)):
             return True, f"launched '{pref}'"
         return False, f"failed to launch '{pref}' (not on PATH?)"
 
     # auto: $BROWSER env var (colon-separated list, per xdg spec)
     env_browser = os.environ.get("BROWSER", "")
     for cand in (c.strip() for c in env_browser.split(":") if c.strip()):
-        if _spawn([cand, url]):
+        if _spawn(_browser_argv(cand, url)):
             return True, f"launched $BROWSER ({cand})"
 
     import shutil

@@ -59,11 +59,21 @@ class TestNoneSkipsLaunch:
 
 
 class TestExplicitBrowser:
-    def test_specific_command_is_launched(self, fake_popen, no_env_browser):
+    def test_specific_firefox_gets_new_tab_flag(self, fake_popen, no_env_browser):
+        # `--browser firefox` must inject `--new-tab` so we route the URL
+        # to a running Firefox via remote control instead of starting a
+        # fresh process that fights the profile lock.
         opened, detail = box64_web._open_browser(URL, "firefox")
         assert opened is True
         assert "firefox" in detail
-        assert fake_popen == [["firefox", URL]]
+        assert fake_popen == [["firefox", "--new-tab", URL]]
+
+    def test_specific_chromium_no_new_tab_flag(self, fake_popen, no_env_browser):
+        # Non-Firefox browsers must NOT receive --new-tab (Chromium has
+        # its own remote-control protocol; the flag would be misparsed).
+        opened, detail = box64_web._open_browser(URL, "chromium")
+        assert opened is True
+        assert fake_popen == [["chromium", URL]]
 
     def test_specific_command_failure_returns_false(self, fake_popen, no_env_browser):
         fake_popen.fail = True
@@ -175,10 +185,122 @@ class TestSudoDropsPrivs:
         monkeypatch.delenv("BROWSER", raising=False)
 
         box64_web._open_browser(URL, "firefox")
-        assert fake_popen == [["sudo", "-u", "alice", "firefox", URL]]
+        assert fake_popen == [["sudo", "-u", "alice", "firefox", "--new-tab", URL]]
 
     def test_no_sudo_when_sudo_user_unset(self, fake_popen, no_env_browser, monkeypatch):
         # Even if euid is 0, no SUDO_USER means we don't wrap with sudo -u.
         monkeypatch.setattr(os, "geteuid", lambda: 0)
         box64_web._open_browser(URL, "firefox")
-        assert fake_popen == [["firefox", URL]]
+        assert fake_popen == [["firefox", "--new-tab", URL]]
+
+
+class TestBrowserArgv:
+    def test_firefox_family_gets_new_tab(self):
+        for cmd in ("firefox", "firefox-bin", "firefox-esr",
+                    "firefox-developer-edition", "firefox-nightly"):
+            assert box64_web._browser_argv(cmd, URL) == [cmd, "--new-tab", URL]
+
+    def test_firefox_with_path_prefix_still_recognized(self):
+        # User may pass an absolute path (e.g. via $BROWSER); we strip the
+        # dirname before matching, so /usr/bin/firefox still gets --new-tab.
+        argv = box64_web._browser_argv("/usr/bin/firefox", URL)
+        assert argv == ["/usr/bin/firefox", "--new-tab", URL]
+
+    def test_non_firefox_browsers_unchanged(self):
+        for cmd in ("chromium", "google-chrome", "brave", "opera",
+                    "epiphany", "qutebrowser"):
+            assert box64_web._browser_argv(cmd, URL) == [cmd, URL]
+
+
+class TestEnvBrowserNewTab:
+    def test_browser_env_firefox_gets_new_tab(self, fake_popen, monkeypatch):
+        # The `$BROWSER=firefox` resolver path must also inject --new-tab.
+        monkeypatch.delenv("SUDO_USER", raising=False)
+        monkeypatch.setenv("BROWSER", "firefox")
+        opened, _ = box64_web._open_browser(URL, "auto")
+        assert opened is True
+        assert fake_popen[0] == ["firefox", "--new-tab", URL]
+
+
+class TestFirefoxIsRunning:
+    """Cover the /proc scanner, including Snap/Flatpak/dev-edition flavors."""
+
+    def _fake_proc(self, monkeypatch, entries):
+        """Install a fake /proc layout via os/builtins monkeypatching.
+
+        `entries` is a dict: pid_str -> {"comm": str, "cmdline": bytes,
+                                          "exe": Optional[str]}.
+        """
+        monkeypatch.setattr(os, "listdir", lambda path: list(entries.keys())
+                            if path == "/proc" else os.listdir.__wrapped__(path)
+                            if hasattr(os.listdir, "__wrapped__")
+                            else [])
+
+        real_open = open
+
+        def fake_open(path, mode="r", *args, **kwargs):
+            for pid, info in entries.items():
+                if path == f"/proc/{pid}/comm" and "b" not in mode:
+                    from io import StringIO
+                    return StringIO(info["comm"] + "\n")
+                if path == f"/proc/{pid}/cmdline" and "b" in mode:
+                    from io import BytesIO
+                    return BytesIO(info["cmdline"])
+            return real_open(path, mode, *args, **kwargs)
+
+        import builtins
+        monkeypatch.setattr(builtins, "open", fake_open)
+
+        def fake_readlink(path):
+            for pid, info in entries.items():
+                if path == f"/proc/{pid}/exe":
+                    if info.get("exe") is None:
+                        raise OSError("no exe")
+                    return info["exe"]
+            raise OSError("not found")
+
+        monkeypatch.setattr(os, "readlink", fake_readlink)
+
+    def test_detects_plain_firefox(self, monkeypatch):
+        self._fake_proc(monkeypatch, {
+            "1234": {"comm": "firefox", "cmdline": b"/usr/bin/firefox\x00",
+                     "exe": "/usr/bin/firefox"},
+        })
+        assert box64_web._firefox_is_running() is True
+
+    def test_detects_developer_edition(self, monkeypatch):
+        # comm "firefox-developer-edition" matches via comm.startswith("firefox").
+        self._fake_proc(monkeypatch, {
+            "2222": {"comm": "firefox-developer-edition",
+                     "cmdline": b"/opt/firefox-developer/firefox\x00",
+                     "exe": "/opt/firefox-developer/firefox"},
+        })
+        assert box64_web._firefox_is_running() is True
+
+    def test_detects_snap_via_exe_symlink(self, monkeypatch):
+        # Snap firefox shows comm that may not start with "firefox", but
+        # the /proc/<pid>/exe symlink reveals /snap/firefox/.../firefox.
+        self._fake_proc(monkeypatch, {
+            "3333": {"comm": "MainThread",  # snap launcher comm
+                     "cmdline": b"/snap/firefox/current/usr/lib/firefox/firefox\x00",
+                     "exe": "/snap/firefox/current/usr/lib/firefox/firefox"},
+        })
+        assert box64_web._firefox_is_running() is True
+
+    def test_no_firefox_returns_false(self, monkeypatch):
+        self._fake_proc(monkeypatch, {
+            "4444": {"comm": "chromium", "cmdline": b"/usr/bin/chromium\x00",
+                     "exe": "/usr/bin/chromium"},
+            "5555": {"comm": "bash", "cmdline": b"/bin/bash\x00",
+                     "exe": "/bin/bash"},
+        })
+        assert box64_web._firefox_is_running() is False
+
+    def test_unrelated_process_named_firefox_in_comm_only(self, monkeypatch):
+        # comm starts with "firefox" but cmdline doesn't mention firefox →
+        # should NOT count (false-positive guard).
+        self._fake_proc(monkeypatch, {
+            "6666": {"comm": "firefox-decoy", "cmdline": b"/usr/local/bin/decoy\x00",
+                     "exe": "/usr/local/bin/decoy"},
+        })
+        assert box64_web._firefox_is_running() is False
