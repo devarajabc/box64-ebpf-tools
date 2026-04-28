@@ -2021,12 +2021,10 @@ def main():
         b.attach_uprobe(name=binary, sym="pressure_vessel", fn_name="pressure_vessel_entry")
         probe_count += 1
 
-    # sched_process_fork tracepoint for parent->child PID mapping
-    try:
-        b.attach_tracepoint(tp="sched:sched_process_fork", fn_name="sched__sched_process_fork")
-        probe_count += 1
-    except Exception as e:
-        print(f"WARNING: sched_process_fork tracepoint unavailable: {e}")
+    # sched:sched_process_fork tracepoint (parent->child PID mapping):
+    # auto-attached by BCC's TRACEPOINT_PROBE() macro at BPF() construction
+    # time, so no explicit attach call is needed.
+    probe_count += 1
 
     # ---- Custom allocator probes ----
     if not args.no_mem:
