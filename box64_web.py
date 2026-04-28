@@ -32,6 +32,64 @@ _state = {
 }
 
 
+def _self_test(host, port, deadline_s=3.0):
+    """
+    Verify the dashboard's critical endpoints are responding before we
+    advertise the URL to the user.
+
+    Returns a list of failure descriptions (empty list = healthy).
+    Each endpoint gets up to `deadline_s` seconds total. We start with
+    `/` (proves the daemon thread is alive) and only check the API
+    routes if `/` works — saves time when the server is dead.
+    """
+    import http.client
+    import json as _json
+
+    def _try(method, path, expect_json=False, expect_starts=None,
+             timeout=0.5):
+        """Returns None on success, error string on failure."""
+        try:
+            conn = http.client.HTTPConnection(host, port, timeout=timeout)
+            conn.request(method, path)
+            resp = conn.getresponse()
+            status = resp.status
+            body = resp.read(4096)
+            conn.close()
+            if status != 200:
+                return f"{path} → HTTP {status}"
+            if expect_starts and not body.lstrip().startswith(expect_starts):
+                return f"{path} → unexpected body (got {body[:30]!r})"
+            if expect_json:
+                try:
+                    _json.loads(body)
+                except Exception as e:
+                    return f"{path} → invalid JSON ({e})"
+            return None
+        except (OSError, http.client.HTTPException) as e:
+            return f"{path} → {type(e).__name__}: {e}"
+
+    # Wait for the daemon thread to finish binding and start serving.
+    poll_deadline = time.time() + deadline_s
+    while time.time() < poll_deadline:
+        err = _try("GET", "/", expect_starts=b"<!DOCTYPE")
+        if err is None:
+            break
+        time.sleep(0.05)
+    else:
+        return [err or "/ never responded"]
+
+    failures = []
+    for path, kwargs in [
+        ("/api/snapshot", {"expect_json": True}),
+        ("/api/history",  {"expect_json": True}),
+        ("/stats",        {"expect_json": True}),
+    ]:
+        err = _try("GET", path, **kwargs)
+        if err is not None:
+            failures.append(err)
+    return failures
+
+
 def emit_event(event_type, data):
     """Push an event into the ring + broadcast to SSE clients.
 
@@ -204,42 +262,29 @@ def start(port, snapshot_fn, stats_fn, history_interval=3.0, host="127.0.0.1",
     t.start()
     url = f"http://{host}:{port}/"
 
-    # Self-test: verify the server actually responds before we hand the
-    # URL to the user. If `serve_forever` died on the daemon thread (or
-    # is still warming up after the close-wait reuse), surface that NOW
-    # rather than letting the user discover it via a hung browser tab.
-    import socket as _socket
-    deadline = time.monotonic() + 2.0
-    healthy = False
-    while time.monotonic() < deadline:
-        try:
-            s = _socket.create_connection((host, port), timeout=0.25)
-            s.sendall(b"GET / HTTP/1.0\r\n\r\n")
-            head = s.recv(64)
-            s.close()
-            if head.startswith(b"HTTP/1.") and b"200" in head[:32]:
-                healthy = True
-                break
-        except OSError:
-            pass
-        time.sleep(0.05)
-
-    if not healthy:
-        # Tear down what we built and raise so the caller can fall back
-        # to --no-web mode rather than print a URL that won't load.
+    # Self-test: verify the server actually responds AND that every
+    # endpoint the frontend depends on returns a sane status before we
+    # hand the URL to the user. If anything's broken (daemon thread
+    # died, route mis-wired, snapshot_fn raised), surface it here
+    # instead of letting the user discover it via a blank browser tab.
+    failures = _self_test(host, port)
+    if failures:
         try:
             server.shutdown()
             server.server_close()
         except Exception:
             pass
-        raise OSError(f"web server bound on {url} but did not respond to a "
-                      f"local self-test within 2 s — daemon thread likely "
-                      f"died on startup. Re-run with BOX64_TRACE_DEBUG=1 "
-                      f"for the traceback.")
+        raise OSError(
+            f"web server bound on {url} but the self-test failed: "
+            + "; ".join(failures)
+            + ". Re-run with BOX64_TRACE_DEBUG=1 for the daemon-thread "
+            "traceback.")
 
     # Print the URL prominently so the user can always copy-paste it,
     # whatever happens with auto-open below.
     print(f"[*] Web dashboard:  {url}")
+    print(f"[*] Verified:       index.html, /api/snapshot, /api/history, "
+          f"/stats — server is responding.")
 
     opened, detail = _open_browser(url, browser_pref)
     if opened:
