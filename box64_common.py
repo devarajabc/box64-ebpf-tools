@@ -272,3 +272,104 @@ def _rewrite_atomic_increment(bpf_text):
         _replace,
         bpf_text,
     )
+
+
+# ---------------------------------------------------------------------------
+# Error diagnosis
+# ---------------------------------------------------------------------------
+
+REPO_ISSUES_URL = "https://github.com/devarajabc/box64-ebpf-tools/issues"
+BCC_INSTALL_URL = "https://github.com/iovisor/bcc/blob/master/INSTALL.md"
+
+
+def diagnose_bpf_error(err):
+    """
+    Turn a BPF/BCC exception into a (summary, hint) tuple, or None if we
+    don't recognise the message. Pattern-matches the most common failure
+    modes so users get an actionable hint instead of a 30-line traceback
+    into BCC internals.
+    """
+    msg = str(err).lower()
+
+    if "operation not permitted" in msg or "permission denied" in msg:
+        return (
+            "eBPF requires root or CAP_BPF/CAP_SYS_ADMIN.",
+            "Re-run with `sudo`, or grant capabilities with "
+            "`setcap cap_bpf,cap_perfmon,cap_sys_admin+ep $(which python3)`.",
+        )
+
+    if (("no such file" in msg or "not found" in msg)
+            and ("kernel" in msg or "header" in msg or "/lib/modules/" in msg)):
+        return (
+            "BCC could not find this kernel's headers.",
+            "Install kernel headers for the running kernel: "
+            "`apt install linux-headers-$(uname -r)` (Debian/Ubuntu), "
+            "`dnf install kernel-devel-$(uname -r)` (Fedora), "
+            "`pacman -S linux-headers` (Arch).",
+        )
+
+    if "kallsyms" in msg or ("kprobe" in msg and "not exist" in msg):
+        return (
+            "Possible kernel ↔ BCC version mismatch.",
+            f"Update python3-bcc to a build matching your kernel "
+            f"({_uname_release()}); see {BCC_INSTALL_URL}.",
+        )
+
+    if (("could not find" in msg or "unknown symbol" in msg)
+            and ("shared object" in msg or "binary" in msg or ".so" in msg)):
+        return (
+            "A symbol the tracer expects is missing from the box64 binary.",
+            "Box64 was likely stripped or built without debug symbols. "
+            "Rebuild with `-DCMAKE_BUILD_TYPE=RelWithDebInfo` and skip strip. "
+            "Confirm with `nm $(which box64) | grep customMalloc`.",
+        )
+
+    if "operation not supported" in msg or ("btf" in msg and "not" in msg):
+        return (
+            "Kernel may have been built without BPF/BTF support.",
+            "Check `/boot/config-$(uname -r)` for CONFIG_BPF=y, "
+            "CONFIG_BPF_SYSCALL=y, CONFIG_DEBUG_INFO_BTF=y.",
+        )
+
+    return None
+
+
+def _uname_release():
+    try:
+        return os.uname().release
+    except AttributeError:
+        return "unknown kernel"
+
+
+def report_fatal(exc, *, debug=False):
+    """
+    Print a clean error envelope around an unexpected exception and return
+    the suggested exit code (1). Used by both tools' top-level __main__
+    handlers.
+
+    If `debug` (or BOX64_TRACE_DEBUG=1 in the environment) is set, prints
+    the full traceback so the user can include it in a bug report. Always
+    points at the issues URL so users know where to send the report.
+    """
+    import traceback
+
+    print(file=sys.stderr)
+    print(f"[FATAL] {type(exc).__name__}: {exc}", file=sys.stderr)
+
+    diag = diagnose_bpf_error(exc)
+    if diag is not None:
+        summary, hint = diag
+        print(f"        {summary}", file=sys.stderr)
+        print(f"        → {hint}", file=sys.stderr)
+        return 1
+
+    if debug or os.environ.get("BOX64_TRACE_DEBUG"):
+        print(file=sys.stderr)
+        traceback.print_exc()
+    else:
+        print(f"[FATAL] This looks unexpected. Re-run with "
+              f"`BOX64_TRACE_DEBUG=1` for the full traceback,",
+              file=sys.stderr)
+        print(f"        then file an issue at {REPO_ISSUES_URL}",
+              file=sys.stderr)
+    return 1

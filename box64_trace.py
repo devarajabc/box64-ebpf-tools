@@ -1564,6 +1564,8 @@ from box64_common import (
     _patch_bcc_uretprobe,
     _bcc_has_atomic_increment,
     _rewrite_atomic_increment,
+    diagnose_bpf_error,
+    report_fatal,
 )
 
 
@@ -1826,19 +1828,33 @@ def main():
         looks_like_profile_error = track_profile and any(
             marker in err_text for marker in profile_error_markers
         )
-        if not looks_like_profile_error:
+        if looks_like_profile_error:
+            print(f"WARNING: BPF compilation failed with TRACK_PROFILE enabled: {e}")
+            print("WARNING: Retrying without PC sampling (BCC version incompatibility)")
+            cflags = [f for f in cflags if f not in ("-DTRACK_PROFILE", f"-DPROFILE_CAPACITY={hash_cap}")]
+            track_profile = False
+            try:
+                b = BPF(text=bpf_src, cflags=cflags)
+            except Exception as retry_err:
+                # Surface a clean diagnosis if we recognise the second error.
+                diag = diagnose_bpf_error(retry_err)
+                if diag:
+                    summary, hint = diag
+                    print(f"\n[FATAL] BPF compilation failed: {summary}", file=sys.stderr)
+                    print(f"        → {hint}", file=sys.stderr)
+                raise RuntimeError(
+                    f"BPF compilation failed even after disabling TRACK_PROFILE. "
+                    f"Original error: {e}"
+                ) from retry_err
+        else:
+            # Not a known-recoverable error. Try to give the user a hint
+            # before re-raising for the top-level handler to log.
+            diag = diagnose_bpf_error(e)
+            if diag:
+                summary, hint = diag
+                print(f"\n[FATAL] BPF compilation failed: {summary}", file=sys.stderr)
+                print(f"        → {hint}", file=sys.stderr)
             raise
-        print(f"WARNING: BPF compilation failed with TRACK_PROFILE enabled: {e}")
-        print("WARNING: Retrying without PC sampling (BCC version incompatibility)")
-        cflags = [f for f in cflags if f not in ("-DTRACK_PROFILE", f"-DPROFILE_CAPACITY={hash_cap}")]
-        track_profile = False
-        try:
-            b = BPF(text=bpf_src, cflags=cflags)
-        except Exception as retry_err:
-            raise RuntimeError(
-                f"BPF compilation failed even after disabling TRACK_PROFILE. "
-                f"Original error: {e}"
-            ) from retry_err
 
     probe_count = 0
 
@@ -3421,4 +3437,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        # User Ctrl+C'd before main() installed its own handler, or during
+        # final report printing — exit with the conventional 130.
+        sys.exit(130)
+    except SystemExit:
+        # main() and helpers use sys.exit(N) to forward child rc / signal
+        # missing-deps. Let those through unchanged.
+        raise
+    except Exception as e:
+        sys.exit(report_fatal(e))

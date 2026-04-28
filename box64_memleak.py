@@ -670,6 +670,8 @@ from box64_common import (
     read_minflt,
     _clear_stale_uprobes,
     _patch_bcc_uretprobe,
+    diagnose_bpf_error,
+    report_fatal,
 )
 
 
@@ -751,7 +753,17 @@ def main():
     _patch_bcc_uretprobe()
 
     print(f"[*] Attaching uprobes to {binary} ...")
-    b = BPF(text=BPF_PROGRAM, cflags=cflags)
+    try:
+        b = BPF(text=BPF_PROGRAM, cflags=cflags)
+    except Exception as e:
+        # Surface a recognised BPF/BCC error class with an actionable hint
+        # before letting the top-level handler log the traceback.
+        diag = diagnose_bpf_error(e)
+        if diag:
+            summary, hint = diag
+            print(f"\n[FATAL] BPF compilation failed: {summary}", file=sys.stderr)
+            print(f"        → {hint}", file=sys.stderr)
+        raise
 
     # Attach probes
     b.attach_uprobe(name=binary, sym="customMalloc", fn_name="malloc_entry")
@@ -1190,4 +1202,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except SystemExit:
+        raise
+    except Exception as e:
+        sys.exit(report_fatal(e))
