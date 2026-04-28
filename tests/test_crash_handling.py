@@ -32,14 +32,12 @@ class TestFormatChildExit:
     def test_clean_exit(self):
         rc, msg = box64_trace._format_child_exit(_exit_status(0))
         assert rc == 0
-        assert "cleanly" in msg
-        assert "rc=0" in msg
+        assert "exited (rc=0)" in msg
 
     def test_nonzero_exit(self):
         rc, msg = box64_trace._format_child_exit(_exit_status(42))
         assert rc == 42
-        assert "rc=42" in msg
-        assert "cleanly" not in msg  # only rc=0 gets the "cleanly" wording
+        assert "exited (rc=42)" in msg
 
     @pytest.mark.parametrize("sig,expected_name", [
         (signal.SIGSEGV, "SIGSEGV"),

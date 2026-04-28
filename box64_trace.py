@@ -1593,8 +1593,8 @@ def _format_child_exit(status):
     if os.WIFEXITED(status):
         rc = os.WEXITSTATUS(status)
         if rc == 0:
-            return rc, "exited cleanly (rc=0)"
-        return rc, f"exited with rc={rc}"
+            return rc, "exited (rc=0)"
+        return rc, f"exited (rc={rc})"
     if os.WIFSIGNALED(status):
         sig = os.WTERMSIG(status)
         rc = 128 + sig
