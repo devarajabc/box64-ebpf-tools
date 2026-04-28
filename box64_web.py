@@ -156,9 +156,14 @@ class Handler(BaseHTTPRequestHandler):
             while True:
                 try:
                     payload = q.get(timeout=15)
+                    # `None` is the shutdown sentinel — drop the connection
+                    # so the client can reconnect (or stop) instead of
+                    # hanging on a now-dead server.
+                    if payload is None:
+                        break
                     self.wfile.write(payload)
                     self.wfile.flush()
-                except Exception:
+                except queue.Empty:
                     # heartbeat to keep the connection alive through proxies
                     self.wfile.write(b": heartbeat\n\n")
                     self.wfile.flush()
@@ -204,6 +209,36 @@ def start(port, snapshot_fn, stats_fn, history_interval=3.0, host="127.0.0.1",
         print(f"[*]                 → open the URL above in your browser.")
 
     return server
+
+
+def shutdown(server):
+    """Tear down the HTTP server promptly: stop the listener, close any
+    open SSE connections, and free the port.
+
+    Called by box64_trace.py once the spawned child exits (or on Ctrl+C)
+    so the browser stops showing stale 'live' data while the tracer is
+    busy printing its final report.
+    """
+    if server is None:
+        return
+    # Wake every connected SSE client by pushing the None sentinel onto
+    # its queue. Their handlers will break out of the read loop and let
+    # the request thread exit cleanly. Any pending heartbeat-timeout
+    # waits stay bounded by the existing 15-second q.get() timeout.
+    with _state["lock"]:
+        clients = list(_state.get("sse_clients", []))
+    for q in clients:
+        try:
+            q.put_nowait(None)
+        except Exception:
+            pass
+    # `shutdown()` blocks until serve_forever returns. Wrap in try in case
+    # the server thread already exited (e.g., parent fork/exec error).
+    try:
+        server.shutdown()
+        server.server_close()
+    except Exception:
+        pass
 
 
 def _open_browser(url, pref="auto"):

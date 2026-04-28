@@ -1571,6 +1571,46 @@ from box64_common import (
 # Spawn-and-trace helpers
 # ---------------------------------------------------------------------------
 
+# Signals where the standard interpretation is "the program crashed" — as
+# opposed to SIGTERM/SIGINT/SIGHUP, which usually mean "the user or another
+# process asked it to stop". When box64 dies from one of these under our
+# tracer, the user almost always wants a hint.
+_CRASH_SIGNALS = frozenset({
+    signal.SIGSEGV, signal.SIGABRT, signal.SIGILL, signal.SIGBUS, signal.SIGFPE,
+})
+
+
+def _format_child_exit(status):
+    """Translate a waitpid() status into (returncode, human-readable message).
+
+    For crash-class signals we append a short hint pointing at the most
+    common Box64 isolation step (`BOX64_DYNAREC=0`) and at where Mono dumps
+    crash JSON, since Unity-on-Box64 is the most common failure mode users
+    hit.
+    """
+    if os.WIFEXITED(status):
+        rc = os.WEXITSTATUS(status)
+        if rc == 0:
+            return rc, "exited cleanly (rc=0)"
+        return rc, f"exited with rc={rc}"
+    if os.WIFSIGNALED(status):
+        sig = os.WTERMSIG(status)
+        rc = 128 + sig
+        try:
+            name = signal.Signals(sig).name
+        except ValueError:
+            name = f"signal {sig}"
+        msg = f"killed by {name} (rc={rc})"
+        if sig in _CRASH_SIGNALS:
+            msg += (" — looks like a guest-code or DynaRec crash. "
+                    "To isolate, retry with `BOX64_DYNAREC=0` (interpreter "
+                    "mode); if that runs, the bug is in Box64's JIT, not "
+                    "your build. Mono/Unity games dump mono_crash.*.json "
+                    "next to the binary on abort.")
+        return rc, msg
+    return 1, f"unknown exit status {status:#x}"
+
+
 def _resolve_box64_binary(binary):
     """If `binary` does not exist, fall back to `which box64`."""
     if os.path.exists(binary):
@@ -3255,18 +3295,40 @@ def main():
         print("\n" + "=" * 76)
 
     # ---- Optional web dashboard ----
+    # If startup fails (port in use, missing assets, etc.) we keep tracing
+    # without the dashboard rather than killing the whole run — the CLI
+    # report still works and that's the source of truth.
+    web_server = None
+    web_module = None
+    _web_emit = None
     if args.web:
         try:
             import box64_web
-            box64_web.start(args.web, web_snapshot, web_stats_meta,
-                            browser_pref=args.browser)
-            # Expose emit_event so probe handlers can stream events
+            web_server = box64_web.start(
+                args.web, web_snapshot, web_stats_meta,
+                browser_pref=args.browser)
+            web_module = box64_web
             _web_emit = box64_web.emit_event
+        except OSError as e:
+            import errno
+            if e.errno == errno.EADDRINUSE:
+                print(f"WARNING: port {args.web} is already in use — dashboard "
+                      f"disabled.")
+                print(f"         Try `--web {args.web + 1}` (or any free port), "
+                      f"or run")
+                print(f"         `ss -lntp | grep ':{args.web} '` to see what "
+                      f"is holding it.")
+            elif e.errno == errno.EACCES:
+                print(f"WARNING: permission denied binding port {args.web} — "
+                      f"dashboard disabled.")
+                print(f"         Ports < 1024 require CAP_NET_BIND_SERVICE; "
+                      f"pick a higher port with `--web 8642`.")
+            else:
+                print(f"WARNING: failed to start web dashboard ({e}) — "
+                      f"continuing without it.")
         except Exception as e:
-            print(f"WARNING: failed to start web dashboard: {e}")
-            _web_emit = None
-    else:
-        _web_emit = None
+            print(f"WARNING: failed to start web dashboard: "
+                  f"{type(e).__name__}: {e} — continuing without it.")
 
     # ---- Main loop ----
     prev_vals = read_stats()
@@ -3283,12 +3345,15 @@ def main():
             spawned_pid = None
             return
         if wpid == spawned_pid:
-            if os.WIFEXITED(status):
-                child_returncode[0] = os.WEXITSTATUS(status)
-            elif os.WIFSIGNALED(status):
-                child_returncode[0] = 128 + os.WTERMSIG(status)
-            print(f"[*] Child PID {spawned_pid} exited (rc={child_returncode[0]}); "
-                  f"finishing report.")
+            rc, msg = _format_child_exit(status)
+            child_returncode[0] = rc
+            print(f"[*] Child PID {spawned_pid} {msg}")
+            # Tear down the dashboard right away so the browser stops
+            # showing stale 'live' data while we print the final report.
+            if web_module is not None and web_server is not None:
+                print(f"[*] Shutting down web dashboard.")
+                web_module.shutdown(web_server)
+            print(f"[*] Finishing report.")
             spawned_pid = None
             exiting[0] = True
 
@@ -3340,12 +3405,17 @@ def main():
         try:
             os.kill(spawned_pid, signal.SIGTERM)
             wpid, status = os.waitpid(spawned_pid, 0)
-            if os.WIFEXITED(status):
-                child_returncode[0] = os.WEXITSTATUS(status)
-            elif os.WIFSIGNALED(status):
-                child_returncode[0] = 128 + os.WTERMSIG(status)
+            rc, _ = _format_child_exit(status)
+            child_returncode[0] = rc
         except (ProcessLookupError, ChildProcessError):
             pass
+
+    # Tear down the dashboard if it's still up (Ctrl+C path, attach mode,
+    # or any case where _poll_child_exit didn't run). Idempotent — calling
+    # shutdown() on an already-stopped server is a no-op.
+    if web_module is not None and web_server is not None:
+        web_module.shutdown(web_server)
+
     if args.command:
         sys.exit(child_returncode[0])
 
