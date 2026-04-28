@@ -44,7 +44,25 @@ make -j$(nproc)
 sudo make install
 ```
 
-### 3. Pick a tool and run
+### 3. (optional) Install on `$PATH`
+
+Run `./install.sh` to drop thin wrappers into `$PREFIX/bin` (defaults to
+`/usr/local/bin`, uses `sudo` when needed) and the Python sources +
+`web/` assets into `$PREFIX/lib/box64-ebpf-tools/`. After this, you can
+invoke the tools as bare commands instead of `python3 box64_trace.py`:
+
+```bash
+# System-wide install (uses sudo for /usr/local).
+./install.sh
+
+# Or user-local — make sure ~/.local/bin is on your sudo PATH.
+PREFIX=$HOME/.local ./install.sh
+
+# Remove later with the same PREFIX.
+./uninstall.sh
+```
+
+### 4. Pick a tool and run
 
 The fastest way: **spawn-and-trace mode** — pass your normal box64 command
 after `--` and the tracer launches it for you, attaches probes before any
@@ -52,28 +70,27 @@ guest code runs, and auto-opens the browser dashboard. Stdio passes
 through and the tracer exits with the program's return code.
 
 ```bash
-# Run a program under tracing — same args you'd normally pass to box64.
+# Installed:
+sudo box64_trace -- box64 ./game.exe
+sudo box64_trace -- ./game.exe         # via binfmt_misc
+sudo box64_trace --no-web -- box64 ./game.exe
+
+# Or run from the repo without installing:
 sudo python3 box64_trace.py -- box64 ./game.exe
-
-# Or, if box64 is registered with binfmt_misc, just exec the x86_64 binary.
-sudo python3 box64_trace.py -- ./game.exe
-
-# Pass --no-web to skip the dashboard.
-sudo python3 box64_trace.py --no-web -- box64 ./game.exe
 ```
 
 Or attach to an already-running session:
 
 ```bash
 # Find leaks in Box64's customMalloc/customFree allocator.
-sudo python3 box64_memleak.py -p <PID>
+sudo box64_memleak -p <PID>            # or: sudo python3 box64_memleak.py -p <PID>
 
 # Profile across all running box64 processes — for Steam sessions where
 # many box64 instances run concurrently.
-sudo python3 box64_trace.py
+sudo box64_trace                       # or: sudo python3 box64_trace.py
 
 # Same, with the browser dashboard.
-sudo python3 box64_trace.py --web
+sudo box64_trace --web
 ```
 
 Common flags: `-b BINARY` (default `/usr/local/bin/box64`, falls back to
