@@ -46,21 +46,37 @@ sudo make install
 
 ### 3. (optional) Install on `$PATH`
 
-Run `./install.sh` to drop thin wrappers into `$PREFIX/bin` (defaults to
-`/usr/local/bin`, uses `sudo` when needed) and the Python sources +
-`web/` assets into `$PREFIX/lib/box64-ebpf-tools/`. After this, you can
-invoke the tools as bare commands instead of `python3 box64_trace.py`:
+`./install.sh` does three things in order — each can be skipped with a
+flag if you want to drive it yourself:
+
+1. **Detects the distro** (`/etc/os-release`) and installs `python3-bcc`
+   via the right package manager (apt / dnf / pacman / zypper) — but only
+   if `import bcc` doesn't already work. Skip with `--no-bcc`.
+2. **Verifies box64** is on `$PATH` and built with debug symbols
+   (`customMalloc` exported). Tells you how to rebuild if not. Skip with
+   `--no-box64-check`.
+3. **Installs the tools** — Python sources + `web/` frontend into
+   `$PREFIX/lib/box64-ebpf-tools/` and shell wrappers into `$PREFIX/bin/`.
 
 ```bash
-# System-wide install (uses sudo for /usr/local).
+# Interactive system-wide install (default PREFIX=/usr/local).
 ./install.sh
 
-# Or user-local — make sure ~/.local/bin is on your sudo PATH.
+# Unattended (CI, sudo).
+sudo ./install.sh -y
+
+# User-local — make sure ~/.local/bin is on your sudo PATH.
 PREFIX=$HOME/.local ./install.sh
+
+# Just install the tools, don't touch BCC or box64.
+./install.sh --skip-deps
 
 # Remove later with the same PREFIX.
 ./uninstall.sh
 ```
+
+After install, the tools are bare commands instead of
+`python3 box64_trace.py`.
 
 ### 4. Pick a tool and run
 
