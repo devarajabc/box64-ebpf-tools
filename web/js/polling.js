@@ -77,19 +77,18 @@ var KPolling = {
     if (this.evtSource) this.evtSource.close();
 
     this.evtSource = new EventSource('/api/events');
-    this.evtSource.addEventListener('syscall', function(e) {
-      try {
-        var d = JSON.parse(e.data);
-        KEvents.addEvent('syscall', d);
-        KTelemetry.onSyscallEvent(d);
-      } catch(err) {}
-    });
-    this.evtSource.addEventListener('process', function(e) {
-      try {
-        var d = JSON.parse(e.data);
-        KEvents.addEvent('process', d);
-      } catch(err) {}
-    });
+    /* The backend (box64_web.emit_event) sends three event types:
+     * 'process' (fork/exec/clone/pressure_vessel), 'jit' (large allocs,
+     * churn bursts), 'cow' (page-fault bursts). All three flow into
+     * KEvents.addEvent which renders them in the live feed. */
+    ['process', 'jit', 'cow'].forEach(function(kind) {
+      this.evtSource.addEventListener(kind, function(e) {
+        try {
+          var d = JSON.parse(e.data);
+          KEvents.addEvent(kind, d);
+        } catch(err) {}
+      });
+    }, this);
     this.evtSource.onopen = function() {
       KState.connected = true;
       KPolling.setOffline(false);

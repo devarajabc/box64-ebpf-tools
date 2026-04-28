@@ -1498,11 +1498,12 @@ def parse_args():
         description="Trace Box64+Steam multi-process behavior: "
                     "fork/exec lifecycle, per-PID memory, DynaRec JIT, "
                     "mmap, and pressure-vessel detection using eBPF uprobes",
-        epilog="Spawn-and-trace: append `-- COMMAND ARGS...` to launch a "
-               "program under tracing (e.g. `-- box64 game.exe` or just "
-               "`-- game.exe` with binfmt_misc; bare names are auto-"
-               "resolved against cwd like box64 itself does). The browser "
-               "dashboard auto-opens; trace exits with COMMAND's rc.")
+        epilog="Spawn-and-trace: append `-- COMMAND ARGS...` to launch an "
+               "x86_64 Linux program under tracing — e.g. "
+               "`-- box64 MyGame.x86_64`, or just `-- ./MyGame.x86_64` "
+               "with binfmt_misc. Bare names are auto-resolved against "
+               "cwd like box64 itself does. The browser dashboard auto-"
+               "opens; trace exits with COMMAND's rc.")
     p.add_argument("-b", "--binary", default="/usr/local/bin/box64",
                    help="Path to box64 binary (default: /usr/local/bin/box64; "
                         "falls back to `which box64` if missing)")
@@ -1643,8 +1644,9 @@ def _validate_spawn_command(cmd):
     if not cmd:
         return ("error",
                 ("no command given after `--`",
-                 "pass a program to spawn, e.g. `-- box64 game.exe` or "
-                 "just `-- game.exe` (with binfmt_misc)."))
+                 "pass an x86_64 Linux program to spawn, e.g. "
+                 "`-- box64 MyGame.x86_64` or `-- ./MyGame.x86_64` "
+                 "(with binfmt_misc)."))
     import shutil
     name = cmd[0]
     # Path-like name (contains a separator): exec resolves it as a path.

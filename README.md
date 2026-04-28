@@ -61,13 +61,14 @@ program's return code.
 
 ```bash
 # All four of these work — pick whichever matches how you'd normally
-# invoke the program. Bare names are auto-resolved against cwd the same
-# way box64 does internally (BOX64_PATH always includes ./), so you
-# don't need to remember `./`.
-sudo box64_trace -- box64 ./game.exe                    # explicit
-sudo box64_trace -- ./game.exe                          # binfmt_misc → box64
-sudo box64_trace -- game.exe                            # auto ./ prepended
-sudo box64_trace -- box64 game.exe                      # also fine
+# invoke the program. Box64 runs x86_64 Linux ELFs (e.g. Unity Linux
+# builds, native Steam binaries), NOT Windows .exe files. Bare names
+# are auto-resolved against cwd the same way box64 does internally
+# (BOX64_PATH always includes ./), so you don't need to remember `./`.
+sudo box64_trace -- box64 ./MyGame.x86_64               # explicit
+sudo box64_trace -- ./MyGame.x86_64                     # binfmt_misc → box64
+sudo box64_trace -- MyGame.x86_64                       # auto ./ prepended
+sudo box64_trace -- box64 MyGame.x86_64                 # also fine
 ```
 
 Behaviour when things go wrong:

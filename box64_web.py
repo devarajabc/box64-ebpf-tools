@@ -131,7 +131,9 @@ class Handler(BaseHTTPRequestHandler):
             with _state["lock"]:
                 snaps = list(_state["history"])
             self._send_json({"snapshots": snaps})
-        elif path == "/stats":
+        elif path in ("/stats", "/api/stats-meta"):
+            # `/stats` is the legacy path the frontend's polling.js uses;
+            # `/api/stats-meta` is the documented public name. Serve both.
             fn = _state["stats_fn"]
             self._send_json(fn() if fn else {})
         elif path == "/api/events":
