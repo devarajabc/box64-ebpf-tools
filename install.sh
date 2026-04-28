@@ -17,10 +17,11 @@
 #   ./install.sh --skip-deps        # tools only, don't touch BCC / box64
 #
 # Flags:
-#   -y, --yes          assume yes to all prompts (for unattended / CI)
-#   --skip-deps        skip BCC install AND box64 verification
-#   --no-bcc           skip BCC install/check only
-#   --no-box64-check   skip box64 binary verification only
+#   -y, --yes              assume yes to all prompts (for unattended / CI)
+#   --skip-deps            skip BCC + box64 + browser checks (tools only)
+#   --no-bcc               skip BCC install/check only
+#   --no-box64-check       skip box64 binary verification only
+#   --no-browser-check     skip browser-launcher detection only
 
 set -eu
 
@@ -32,12 +33,14 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 ASSUME_YES=0
 SKIP_BCC=0
 SKIP_BOX64=0
+SKIP_BROWSER=0
 for arg in "$@"; do
     case "$arg" in
         -y|--yes) ASSUME_YES=1 ;;
-        --skip-deps) SKIP_BCC=1; SKIP_BOX64=1 ;;
+        --skip-deps) SKIP_BCC=1; SKIP_BOX64=1; SKIP_BROWSER=1 ;;
         --no-bcc) SKIP_BCC=1 ;;
         --no-box64-check) SKIP_BOX64=1 ;;
+        --no-browser-check) SKIP_BROWSER=1 ;;
         -h|--help)
             sed -n '2,/^set -eu$/p' "$0" | sed 's/^# \{0,1\}//; /^set -eu/d'
             exit 0
@@ -161,7 +164,53 @@ install_bcc() {
 }
 
 # ---------------------------------------------------------------------------
-# 2. Verify Box64 is built with debug symbols
+# 2a. Pre-flight: confirm there's a way to auto-open the dashboard
+# ---------------------------------------------------------------------------
+
+check_browser() {
+    # The --web dashboard *always* prints its URL, so a missing browser
+    # launcher is never fatal — it just means the user has to copy-paste
+    # instead of having Firefox/Chrome auto-pop. Surface what's available
+    # so the user knows what `auto` mode will pick (and what to override
+    # with `--browser <cmd>` or $BROWSER if they hit Firefox's "already
+    # running" dialog or similar).
+
+    if [ -n "${BROWSER:-}" ]; then
+        echo "[browser] \$BROWSER set: $BROWSER (auto-open will use this)"
+        return 0
+    fi
+
+    local found=()
+    for b in firefox chromium google-chrome chrome brave-browser microsoft-edge \
+             vivaldi opera epiphany falkon; do
+        if command -v "$b" >/dev/null 2>&1; then
+            found+=("$b")
+        fi
+    done
+
+    local has_xdg_open=0
+    if command -v xdg-open >/dev/null 2>&1; then
+        has_xdg_open=1
+    fi
+
+    if [ ${#found[@]} -gt 0 ] || [ "$has_xdg_open" -eq 1 ]; then
+        echo "[browser] auto-open will work."
+        if [ ${#found[@]} -gt 0 ]; then
+            echo "          detected: ${found[*]}"
+        fi
+        if [ "$has_xdg_open" -eq 1 ]; then
+            echo "          xdg-open available (handles \$XDG_CURRENT_DESKTOP default)"
+        fi
+        echo "          override at runtime with --browser <cmd> or \$BROWSER."
+    else
+        echo "[browser] WARNING: no browser launcher detected on \$PATH."
+        echo "          --web will print the dashboard URL but won't auto-open."
+        echo "          Install a browser, set \$BROWSER, or use --browser <cmd>."
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 2b. Verify Box64 is built with debug symbols
 # ---------------------------------------------------------------------------
 
 check_box64() {
@@ -268,4 +317,5 @@ echo
 
 if [ "$SKIP_BCC" -eq 0 ]; then install_bcc; fi
 if [ "$SKIP_BOX64" -eq 0 ]; then check_box64; fi
+if [ "$SKIP_BROWSER" -eq 0 ]; then check_browser; fi
 install_tools

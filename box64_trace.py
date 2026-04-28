@@ -2015,8 +2015,12 @@ def main():
     # ---- Graceful exit ----
     exiting = [False]
     child_returncode = [0]
+    _user_signalled = [False]
 
     def sig_handler(signum, frame):
+        # Mark this as user-initiated so the post-loop "stay alive for the
+        # browser" block knows to exit instead of holding open.
+        _user_signalled[0] = True
         exiting[0] = True
 
     signal.signal(signal.SIGINT, sig_handler)
@@ -3350,8 +3354,16 @@ def main():
     prev_vals = read_stats()
     last_print = time.monotonic()
 
+    child_exited = [False]
+
     def _poll_child_exit():
-        """Reap spawned child if it has exited; flip exiting + capture rc."""
+        """Reap spawned child if it has exited; flip exiting + capture rc.
+
+        We deliberately do NOT shut the dashboard down here — when box64
+        crashes, that's exactly when the user most wants to switch to the
+        browser tab and inspect live state. The dashboard stays up; the
+        user closes it explicitly with Ctrl+C below.
+        """
         nonlocal spawned_pid
         if spawned_pid is None:
             return
@@ -3364,13 +3376,9 @@ def main():
             rc, msg = _format_child_exit(status)
             child_returncode[0] = rc
             print(f"[*] Child PID {spawned_pid} {msg}")
-            # Tear down the dashboard right away so the browser stops
-            # showing stale 'live' data while we print the final report.
-            if web_module is not None and web_server is not None:
-                print(f"[*] Shutting down web dashboard.")
-                web_module.shutdown(web_server)
             print(f"[*] Finishing report.")
             spawned_pid = None
+            child_exited[0] = True
             exiting[0] = True
 
     while not exiting[0]:
@@ -3426,9 +3434,25 @@ def main():
         except (ProcessLookupError, ChildProcessError):
             pass
 
-    # Tear down the dashboard if it's still up (Ctrl+C path, attach mode,
-    # or any case where _poll_child_exit didn't run). Idempotent — calling
-    # shutdown() on an already-stopped server is a no-op.
+    # If the dashboard is up and the child exited on its own (not because
+    # the user Ctrl+C'd), stay alive so the user can switch to the browser
+    # and inspect what was happening when box64 died. This is the whole
+    # reason for the dashboard — exiting silently here defeats it.
+    if (web_module is not None and web_server is not None
+            and child_exited[0] and not _user_signalled[0]):
+        host_port = f"{web_server.server_address[0]}:{web_server.server_address[1]}"
+        print(f"[*] Dashboard still serving at http://{host_port}/ — "
+              f"Ctrl+C to shut down (will exit rc={child_returncode[0]}).")
+        try:
+            # Block on a long sleep loop instead of signal.pause() so we
+            # remain testable on platforms where pause() needs threads.
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            pass
+
+    # Tear down the dashboard cleanly. Idempotent — shutdown() on an
+    # already-stopped server is a no-op.
     if web_module is not None and web_server is not None:
         web_module.shutdown(web_server)
 

@@ -66,7 +66,7 @@ class TestStatic:
         r = _run(str(INSTALL_SH), "--help")
         assert r.returncode == 0
         for needle in ("--yes", "--skip-deps", "--no-bcc",
-                       "--no-box64-check", "PREFIX"):
+                       "--no-box64-check", "--no-browser-check", "PREFIX"):
             assert needle in r.stdout, f"--help missing '{needle}'"
 
     def test_unknown_flag_exits_nonzero(self):
@@ -193,3 +193,55 @@ class TestFlags:
         r = _install(prefix, "--no-bcc", "--no-box64-check")
         assert r.returncode == 0
         assert "[deps]" not in r.stdout
+
+
+# ---------------------------------------------------------------------------
+# Browser-launcher detection (the `check_browser` step)
+# ---------------------------------------------------------------------------
+
+class TestBrowserCheck:
+    def test_browser_check_runs_by_default(self, tmp_path):
+        prefix = tmp_path / "prefix"
+        r = _install(prefix, "--no-bcc", "--no-box64-check")
+        assert r.returncode == 0
+        # Either the "auto-open will work" success line or the
+        # "WARNING: no browser launcher" line must appear — never silent.
+        assert "[browser]" in r.stdout
+
+    def test_no_browser_check_flag_skips(self, tmp_path):
+        prefix = tmp_path / "prefix"
+        r = _install(prefix, "--no-bcc", "--no-box64-check",
+                     "--no-browser-check")
+        assert r.returncode == 0
+        assert "[browser]" not in r.stdout
+
+    def test_browser_env_var_acknowledged(self, tmp_path):
+        prefix = tmp_path / "prefix"
+        env = os.environ.copy()
+        env["PREFIX"] = str(prefix)
+        env["BROWSER"] = "firefox-esr"
+        r = subprocess.run(
+            [str(INSTALL_SH), "-y", "--no-bcc", "--no-box64-check"],
+            env=env, capture_output=True, text=True,
+        )
+        assert r.returncode == 0
+        assert "$BROWSER set: firefox-esr" in r.stdout
+        # Per-browser detection should not also run when $BROWSER wins.
+        assert "auto-open will work" not in r.stdout
+
+    def test_warning_branch_exists_in_script(self):
+        # End-to-end testing the "no browser anywhere" path is fiddly —
+        # wiping PATH also kills dirname/install/etc that install.sh
+        # needs. Static-check that the script has the warning branch
+        # so it isn't silently dropped in a refactor.
+        src = INSTALL_SH.read_text()
+        assert "WARNING: no browser launcher" in src
+        # Check both pieces of advice the warning gives the user.
+        assert "Install a browser" in src
+        assert "--browser <cmd>" in src
+
+    def test_skip_deps_also_skips_browser(self, tmp_path):
+        prefix = tmp_path / "prefix"
+        r = _install(prefix, "--skip-deps")
+        assert r.returncode == 0
+        assert "[browser]" not in r.stdout
