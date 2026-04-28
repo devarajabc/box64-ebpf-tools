@@ -106,6 +106,24 @@ HTTP server and opens the dashboard in your default browser.
 | Cache policy | Top Outstanding JIT Blocks | Largest live blocks (x64 addr, alloc addr, size, PID) — eviction candidates. |
 | Stream | Event Feed | Live fork / exec / vfork / clone / large-alloc events streamed via Server-Sent Events. |
 
+### Browser auto-open
+
+The dashboard tries to open in your default browser when the server starts.
+The URL is **always printed prominently** so you can copy-paste it if
+auto-open misbehaves (Firefox's "profile is locked" dialog, headless host,
+sudo session boundary, etc.).
+
+```bash
+sudo box64_trace --web --browser firefox    # explicit browser
+sudo box64_trace --web --browser none       # skip auto-open, just print URL
+BROWSER=chromium sudo -E box64_trace --web  # honors $BROWSER
+```
+
+Resolution order in `auto` mode (the default): `$BROWSER` (colon-list, like
+xdg spec) → `xdg-open` → Python's `webbrowser` module. Under `sudo`, the
+launcher is wrapped with `sudo -u $SUDO_USER` so the browser can reach the
+caller's X/Wayland session.
+
 ### HTTP endpoints (served by `box64_web.py`)
 
 | Path | Returns |

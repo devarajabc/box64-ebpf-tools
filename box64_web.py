@@ -170,11 +170,13 @@ class Handler(BaseHTTPRequestHandler):
                     _state["sse_clients"].remove(q)
 
 
-def start(port, snapshot_fn, stats_fn, history_interval=3.0, host="127.0.0.1"):
+def start(port, snapshot_fn, stats_fn, history_interval=3.0, host="127.0.0.1",
+          browser_pref="auto"):
     """Start the HTTP server in a daemon thread.
 
     snapshot_fn: callable returning the current snapshot dict.
     stats_fn:    callable returning binary/pid metadata.
+    browser_pref: "auto" (default), "none", or a command name like "firefox".
     """
     _state["snapshot_fn"] = snapshot_fn
     _state["stats_fn"] = stats_fn
@@ -189,23 +191,87 @@ def start(port, snapshot_fn, stats_fn, history_interval=3.0, host="127.0.0.1"):
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     url = f"http://{host}:{port}/"
-    print(f"[*] Web dashboard: {url}")
 
-    # Best-effort auto-open. Under sudo, browsers can't reach the user's
-    # X/Wayland session — try launching as $SUDO_USER first.
+    # Print the URL prominently so the user can always copy-paste it,
+    # whatever happens with auto-open below.
+    print(f"[*] Web dashboard:  {url}")
+
+    opened, detail = _open_browser(url, browser_pref)
+    if opened:
+        print(f"[*] Auto-opened:    {detail}")
+    else:
+        print(f"[*] Auto-open:      {detail}")
+        print(f"[*]                 → open the URL above in your browser.")
+
+    return server
+
+
+def _open_browser(url, pref="auto"):
+    """
+    Try to open `url` in a browser.
+
+    `pref`:
+      "none"  → skip auto-open entirely (returns (False, reason))
+      "auto"  → respect $BROWSER, then xdg-open, then Python's webbrowser
+      anything else → treat as a command name (e.g. "firefox", "chromium")
+
+    Returns (opened, detail). `opened` is False on skip/failure; `detail`
+    is a short human-readable line for the operator log.
+
+    Why this exists: Firefox prints "already running, but is not responding"
+    when launched while another instance holds the profile lock — and that
+    error is shown by xdg-open's child rather than as a non-zero exit, so
+    we can't reliably detect it. The mitigation is to (a) let the user
+    pick a different browser via --browser or $BROWSER, (b) always print
+    the URL so copy-paste is one step away.
+    """
+    import subprocess
+
+    if pref == "none":
+        return False, "skipped (--browser=none)"
+
     sudo_user = os.environ.get("SUDO_USER")
-    try:
+
+    def _spawn(argv):
+        # Under sudo we have to drop privs so the browser can reach the
+        # caller's X/Wayland session.
         if sudo_user and os.geteuid() == 0:
-            import subprocess
+            argv = ["sudo", "-u", sudo_user, *argv]
+        try:
             subprocess.Popen(
-                ["sudo", "-u", sudo_user, "xdg-open", url],
+                argv,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-        else:
-            import webbrowser
-            webbrowser.open(url, new=2)
-    except Exception:
-        pass  # silent fallback — URL is printed above
+            return True
+        except (OSError, FileNotFoundError):
+            return False
 
-    return server
+    if pref != "auto":
+        # User specified a browser command directly.
+        if _spawn([pref, url]):
+            return True, f"launched '{pref}'"
+        return False, f"failed to launch '{pref}' (not on PATH?)"
+
+    # auto: $BROWSER env var (colon-separated list, per xdg spec)
+    env_browser = os.environ.get("BROWSER", "")
+    for cand in (c.strip() for c in env_browser.split(":") if c.strip()):
+        if _spawn([cand, url]):
+            return True, f"launched $BROWSER ({cand})"
+
+    # auto: xdg-open
+    import shutil
+    if shutil.which("xdg-open") and _spawn(["xdg-open", url]):
+        return True, "launched via xdg-open"
+
+    # auto: Python's webbrowser (only useful when not under sudo, since the
+    # python3 process can't reach the user's session as root). Returns False
+    # if no browser was found.
+    try:
+        import webbrowser
+        if webbrowser.open(url, new=2):
+            return True, "launched via webbrowser module"
+    except Exception:
+        pass
+
+    return False, "no browser launcher worked"

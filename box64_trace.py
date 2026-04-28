@@ -1536,6 +1536,14 @@ def parse_args():
     p.add_argument("--no-web", action="store_true",
                    help="Disable the web dashboard (only meaningful in spawn mode, "
                         "where --web is otherwise auto-enabled)")
+    p.add_argument("--browser", default="auto", metavar="CMD",
+                   help="Browser to auto-open the dashboard. 'auto' (default) "
+                        "respects $BROWSER, then xdg-open, then Python's "
+                        "webbrowser module. 'none' skips auto-open. Or pass "
+                        "a command name like 'firefox', 'chromium', "
+                        "'google-chrome'. The URL is always printed, so you "
+                        "can copy-paste it if Firefox's profile-lock dialog "
+                        "or any other launcher fails.")
     args = p.parse_args(argv)
     args.command = command
     return args
@@ -3250,7 +3258,8 @@ def main():
     if args.web:
         try:
             import box64_web
-            box64_web.start(args.web, web_snapshot, web_stats_meta)
+            box64_web.start(args.web, web_snapshot, web_stats_meta,
+                            browser_pref=args.browser)
             # Expose emit_event so probe handlers can stream events
             _web_emit = box64_web.emit_event
         except Exception as e:
