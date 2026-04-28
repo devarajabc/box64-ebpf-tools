@@ -119,6 +119,101 @@ class TestSpawnPaused:
         assert os.WIFEXITED(status)
         assert os.WEXITSTATUS(status) == 127
 
+# ---------------------------------------------------------------------------
+# _validate_spawn_command
+# ---------------------------------------------------------------------------
+
+class TestValidateSpawnCommand:
+    """Pre-flight validation. Three return shapes:
+       - None                       → cmd OK as-is
+       - ("info", message)          → cmd[0] auto-rewritten in place
+       - ("error", (summary, hint)) → caller should bail with rc=127
+
+    Auto-rewrite of bare-name-in-cwd → ./name matches what box64 itself
+    does internally (BOX64_PATH includes `./`, see core.c:1058).
+    """
+
+    def test_empty_command_errors(self):
+        result = box64_trace._validate_spawn_command([])
+        assert result is not None
+        kind, payload = result
+        assert kind == "error"
+        summary, _ = payload
+        assert "no command" in summary.lower()
+
+    def test_bare_name_in_cwd_is_auto_rewritten(self, tmp_path, monkeypatch):
+        # The TheRadioTower-Linux.x86_64 case: bare name, file in cwd,
+        # not on $PATH. Must be auto-rewritten to ./name, NOT rejected.
+        binary = tmp_path / "myprog"
+        binary.write_text("#!/bin/sh\necho hi\n")
+        binary.chmod(0o755)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+        cmd = ["myprog"]
+        result = box64_trace._validate_spawn_command(cmd)
+        assert result is not None, "expected an info result, got None"
+        kind, message = result
+        assert kind == "info", f"expected auto-fix, got {result!r}"
+        # The cmd list is rewritten in place.
+        assert cmd[0] == os.path.join(".", "myprog")
+        assert "Resolved" in message
+        assert "myprog" in message
+
+    def test_bare_name_on_path_passes(self):
+        assert box64_trace._validate_spawn_command(["ls"]) is None
+
+    def test_relative_path_with_dot_slash_passes(self, tmp_path, monkeypatch):
+        binary = tmp_path / "myprog"
+        binary.write_text("#!/bin/sh\necho hi\n")
+        binary.chmod(0o755)
+        monkeypatch.chdir(tmp_path)
+        # Already path-like → no rewrite, no error.
+        assert box64_trace._validate_spawn_command(["./myprog"]) is None
+
+    def test_absolute_path_passes(self, tmp_path):
+        binary = tmp_path / "myprog"
+        binary.write_text("#!/bin/sh\necho hi\n")
+        binary.chmod(0o755)
+        assert box64_trace._validate_spawn_command([str(binary)]) is None
+
+    def test_path_like_nonexistent_errors(self):
+        result = box64_trace._validate_spawn_command(["./does/not/exist"])
+        assert result is not None
+        kind, payload = result
+        assert kind == "error"
+        summary, _ = payload
+        assert "not a file" in summary.lower()
+
+    def test_path_like_directory_errors(self, tmp_path):
+        result = box64_trace._validate_spawn_command([str(tmp_path)])
+        assert result is not None
+        kind, payload = result
+        assert kind == "error"
+        assert "not a file" in payload[0].lower()
+
+    def test_path_like_not_executable_errors(self, tmp_path):
+        f = tmp_path / "nonexec"
+        f.write_text("hi")
+        f.chmod(0o644)
+        result = box64_trace._validate_spawn_command([str(f)])
+        assert result is not None
+        kind, payload = result
+        assert kind == "error"
+        summary, hint = payload
+        assert "not executable" in summary.lower()
+        assert "chmod" in hint
+
+    def test_truly_missing_command_errors(self, monkeypatch):
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
+        result = box64_trace._validate_spawn_command(
+            ["a-tool-that-does-not-exist-anywhere-xyz123"])
+        assert result is not None
+        kind, payload = result
+        assert kind == "error"
+        summary, _ = payload
+        assert "not found" in summary.lower()
+
     def test_passes_argv_through(self, tmp_path):
         # Verify all argv elements reach the executed program intact.
         out = tmp_path / "argv"

@@ -1622,6 +1622,57 @@ def _resolve_box64_binary(binary):
     return found or binary  # let check_binary fail with a clear message
 
 
+def _validate_spawn_command(cmd):
+    """
+    Validate cmd[0] for execvp(). May rewrite cmd[0] in place to handle
+    the most common mistake transparently.
+
+    Returns:
+      None                       — cmd is fine, proceed.
+      ("info", message)          — cmd[0] was auto-rewritten in place;
+                                   caller should log `message`. Proceed.
+      ("error", (summary, hint)) — cmd is broken; caller should bail.
+
+    Box64 itself adds `./` to its binary search path (BOX64_PATH in
+    core.c, see ResolveFileSoft) so `box64 program` finds `program` in
+    cwd transparently. Users reasonably expect `box64_trace -- program`
+    to work the same way. We provide that by rewriting bare names that
+    don't exist on $PATH but do exist in cwd to `./name` before execvp.
+    """
+    if not cmd:
+        return ("error",
+                ("no command given after `--`",
+                 "pass a program to spawn, e.g. `-- box64 ./game.exe`"))
+    import shutil
+    name = cmd[0]
+    # Path-like name (contains a separator): exec resolves it as a path.
+    if os.sep in name:
+        if not os.path.isfile(name):
+            return ("error",
+                    (f"'{name}' is not a file",
+                     "double-check the path — exec() won't fall back to "
+                     "anything else for path-like names."))
+        if not os.access(name, os.X_OK):
+            return ("error",
+                    (f"'{name}' exists but is not executable",
+                     f"`chmod +x {name}` if you trust it."))
+        return None
+    # Bare name: exec() consults $PATH only, NEVER the current directory.
+    if shutil.which(name) is not None:
+        return None
+    if os.path.isfile(name):
+        # Auto-fix: rewrite to `./name` so execvp resolves it via cwd
+        # like box64 itself does (see core.c:1058 ResolveFileSoft).
+        cmd[0] = os.path.join(".", name)
+        return ("info",
+                f"Resolved '{name}' to '{cmd[0]}' (was not on $PATH; "
+                f"using cwd lookup like box64 does internally).")
+    return ("error",
+            (f"'{name}' not found on $PATH",
+             "check the spelling, install it, or use an absolute / "
+             "relative path with `./` or `/`."))
+
+
 def _spawn_paused(cmd):
     """
     Fork+exec `cmd`, but SIGSTOP the child *before* exec so the parent has
@@ -1745,6 +1796,21 @@ def main():
     if args.command:
         if not args.web and not args.no_web:
             args.web = 8642  # default dashboard port in spawn mode
+
+        # Validate the command will actually exec BEFORE we spend ~10s
+        # compiling BPF and attaching 42 probes. May auto-rewrite cmd[0]
+        # for bare-name-in-cwd cases the way box64 itself does.
+        result = _validate_spawn_command(args.command)
+        if result is not None:
+            kind, payload = result
+            if kind == "info":
+                print(f"[*] {payload}")
+            else:  # "error"
+                summary, hint = payload
+                print(f"ERROR: {summary}", file=sys.stderr)
+                print(f"       {hint}", file=sys.stderr)
+                sys.exit(127)
+
         cmd_str = " ".join(args.command)
         print(f"[*] Spawning: {cmd_str}")
         try:
@@ -3438,8 +3504,13 @@ def main():
     # the user Ctrl+C'd), stay alive so the user can switch to the browser
     # and inspect what was happening when box64 died. This is the whole
     # reason for the dashboard — exiting silently here defeats it.
+    #
+    # Skip the wait when rc=127 (our exec-failure marker from _spawn_paused
+    # plus _validate_spawn_command's exit code): the child never actually
+    # ran, so the report is empty and the dashboard has nothing to show.
     if (web_module is not None and web_server is not None
-            and child_exited[0] and not _user_signalled[0]):
+            and child_exited[0] and not _user_signalled[0]
+            and child_returncode[0] != 127):
         host_port = f"{web_server.server_address[0]}:{web_server.server_address[1]}"
         print(f"[*] Dashboard still serving at http://{host_port}/ — "
               f"Ctrl+C to shut down (will exit rc={child_returncode[0]}).")
