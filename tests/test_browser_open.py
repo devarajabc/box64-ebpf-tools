@@ -178,20 +178,124 @@ class TestAutoMode:
 
 
 class TestSudoDropsPrivs:
-    def test_sudo_user_wraps_command(self, fake_popen, monkeypatch):
-        # Simulate running under sudo with a known SUDO_USER.
+    def test_sudo_user_wraps_command_no_session_env(self, fake_popen, monkeypatch):
+        # Simulate running under sudo with a known SUDO_USER, but no
+        # discoverable session env. We should still wrap with sudo -u
+        # (just without the env shim).
         monkeypatch.setenv("SUDO_USER", "alice")
         monkeypatch.setattr(os, "geteuid", lambda: 0)
         monkeypatch.delenv("BROWSER", raising=False)
+        monkeypatch.setattr(box64_web, "_user_session_env", lambda u: {})
 
         box64_web._open_browser(URL, "firefox")
         assert fake_popen == [["sudo", "-u", "alice", "firefox", "--new-tab", URL]]
+
+    def test_sudo_user_wraps_with_session_env(self, fake_popen, monkeypatch):
+        # When _user_session_env finds the user's GUI vars, they must be
+        # interpolated through `env K=V K=V` so the sudo'd Firefox can
+        # reach the existing session via DBus / XRemote.
+        monkeypatch.setenv("SUDO_USER", "alice")
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+        monkeypatch.delenv("BROWSER", raising=False)
+        monkeypatch.setattr(box64_web, "_user_session_env", lambda u: {
+            "DISPLAY": ":0",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        })
+
+        box64_web._open_browser(URL, "firefox")
+        # `env` shim must appear before the firefox command, with the
+        # discovered vars in K=V form.
+        assert fake_popen[0][:4] == ["sudo", "-u", "alice", "env"]
+        rest = fake_popen[0][4:]
+        # Both env entries are present (order is dict insertion order
+        # in Py3.7+ but we don't want the test to depend on that).
+        env_pairs = rest[:2]
+        cmd = rest[2:]
+        assert sorted(env_pairs) == sorted([
+            "DISPLAY=:0",
+            "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+        ])
+        assert cmd == ["firefox", "--new-tab", URL]
 
     def test_no_sudo_when_sudo_user_unset(self, fake_popen, no_env_browser, monkeypatch):
         # Even if euid is 0, no SUDO_USER means we don't wrap with sudo -u.
         monkeypatch.setattr(os, "geteuid", lambda: 0)
         box64_web._open_browser(URL, "firefox")
         assert fake_popen == [["firefox", "--new-tab", URL]]
+
+
+class TestUserSessionEnv:
+    """Cover env extraction from /proc/<pid>/environ."""
+
+    def test_returns_empty_when_no_sudo_user(self):
+        assert box64_web._user_session_env(None) == {}
+        assert box64_web._user_session_env("") == {}
+
+    def test_returns_empty_when_user_unknown(self, monkeypatch):
+        import pwd
+        def _raise(name):
+            raise KeyError(name)
+        monkeypatch.setattr(pwd, "getpwnam", _raise)
+        assert box64_web._user_session_env("nosuchuser") == {}
+
+    def test_extracts_session_vars_from_proc_environ(self, monkeypatch, tmp_path):
+        import pwd
+        from io import BytesIO
+
+        # Pretend "alice" is uid 1000.
+        class _Pw:
+            pw_uid = 1000
+        monkeypatch.setattr(pwd, "getpwnam", lambda name: _Pw)
+
+        # Fake /proc with two pids — only pid 1234 is owned by uid 1000.
+        monkeypatch.setattr(os, "listdir",
+                            lambda p: ["1234", "5678"] if p == "/proc" else [])
+
+        class _Stat:
+            def __init__(self, uid):
+                self.st_uid = uid
+
+        def fake_stat(path):
+            if path == "/proc/1234":
+                return _Stat(1000)
+            if path == "/proc/5678":
+                return _Stat(0)  # owned by root, should be skipped
+            raise OSError(path)
+        monkeypatch.setattr(os, "stat", fake_stat)
+
+        # /proc/1234/environ has DISPLAY + DBUS, /proc/5678/environ has
+        # XAUTHORITY but won't be read (not owned by uid).
+        environ_data = (
+            b"DISPLAY=:0\x00"
+            b"WAYLAND_DISPLAY=wayland-0\x00"
+            b"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus\x00"
+            b"XDG_RUNTIME_DIR=/run/user/1000\x00"
+            b"HOME=/home/alice\x00"
+            b"XAUTHORITY=/home/alice/.Xauthority\x00"
+            b"PATH=/usr/bin:/bin\x00"  # not in _SESSION_ENV_KEYS, ignored
+        )
+
+        real_open = open
+
+        def fake_open(path, mode="r", *a, **kw):
+            if path == "/proc/1234/environ":
+                return BytesIO(environ_data)
+            if path == "/proc/5678/environ":
+                return BytesIO(b"XAUTHORITY=/should/not/be/seen\x00")
+            return real_open(path, mode, *a, **kw)
+
+        import builtins
+        monkeypatch.setattr(builtins, "open", fake_open)
+
+        env = box64_web._user_session_env("alice")
+        assert env == {
+            "DISPLAY": ":0",
+            "WAYLAND_DISPLAY": "wayland-0",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+            "XDG_RUNTIME_DIR": "/run/user/1000",
+            "HOME": "/home/alice",
+            "XAUTHORITY": "/home/alice/.Xauthority",
+        }
 
 
 class TestBrowserArgv:

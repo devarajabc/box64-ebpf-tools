@@ -432,6 +432,68 @@ def _firefox_is_running():
     return False
 
 
+_SESSION_ENV_KEYS = (
+    "DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR", "XAUTHORITY", "HOME",
+)
+
+
+def _user_session_env(sudo_user):
+    """Reconstruct the GUI/session env of `sudo_user` from /proc.
+
+    When the operator runs `sudo box64_trace --web`, sudo strips the
+    user's GUI session env (DISPLAY, WAYLAND_DISPLAY, the DBus session
+    bus address, XDG_RUNTIME_DIR, XAUTHORITY) before handing control
+    to root. If we then re-drop into the user with `sudo -u <user>`
+    without those vars, GUI launches like Firefox can't reach the
+    running session: `firefox --new-tab URL` can't dispatch over DBus
+    or XRemote and falls back to spawning a fresh instance, which
+    fights the profile lock and shows the "already running, but is
+    not responding" dialog.
+
+    Workaround: read `/proc/<pid>/environ` of any process still owned
+    by the user — those processes were started inside the live
+    session and carry the right env vars. Return a dict of the first
+    non-empty value found per key. Caller is expected to interpolate
+    these via `sudo -u <user> env K=V K=V <cmd>`.
+    """
+    if not sudo_user:
+        return {}
+    try:
+        import pwd
+        uid = pwd.getpwnam(sudo_user).pw_uid
+    except (ImportError, KeyError):
+        return {}
+
+    found = {}
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                if os.stat(f"/proc/{entry}").st_uid != uid:
+                    continue
+                with open(f"/proc/{entry}/environ", "rb") as f:
+                    data = f.read()
+            except OSError:
+                continue
+            for kv in data.split(b"\x00"):
+                if b"=" not in kv:
+                    continue
+                k, _, v = kv.partition(b"=")
+                try:
+                    key = k.decode("ascii")
+                except UnicodeDecodeError:
+                    continue
+                if key in _SESSION_ENV_KEYS and key not in found:
+                    found[key] = v.decode("utf-8", errors="replace")
+            if all(k in found for k in _SESSION_ENV_KEYS):
+                break  # got everything we wanted
+    except OSError:
+        pass
+    return found
+
+
 def _open_browser(url, pref="auto"):
     """
     Try to open `url` in a browser.
@@ -457,12 +519,23 @@ def _open_browser(url, pref="auto"):
         return False, "skipped (--browser=none)"
 
     sudo_user = os.environ.get("SUDO_USER")
+    session_env = _user_session_env(sudo_user) if sudo_user else {}
 
     def _spawn(argv):
         # Under sudo we have to drop privs so the browser can reach the
-        # caller's X/Wayland session.
+        # caller's X/Wayland session — and we must repopulate the session
+        # env that sudo stripped (DISPLAY, WAYLAND_DISPLAY, DBus address,
+        # XDG_RUNTIME_DIR, XAUTHORITY, HOME). Without those, Firefox's
+        # `--new-tab` can't reach the running instance over DBus/XRemote
+        # and falls back to "start a fresh process", which is exactly
+        # what triggers the profile-lock dialog we're trying to avoid.
         if sudo_user and os.geteuid() == 0:
-            argv = ["sudo", "-u", sudo_user, *argv]
+            if session_env:
+                argv = ["sudo", "-u", sudo_user, "env",
+                        *(f"{k}={v}" for k, v in session_env.items()),
+                        *argv]
+            else:
+                argv = ["sudo", "-u", sudo_user, *argv]
         try:
             subprocess.Popen(
                 argv,
