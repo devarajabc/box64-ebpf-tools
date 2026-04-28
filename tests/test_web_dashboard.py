@@ -101,6 +101,36 @@ class TestStartup:
         # The server's address matches what we asked for.
         assert server.server_address == ("127.0.0.1", port)
 
+    def test_start_auto_scans_when_preferred_port_busy(self, capsys):
+        # Hold the preferred port so start() must scan upward to find
+        # a free one. The dashboard should come up anyway, on a port
+        # that's NOT the preferred one, with a clear announcement.
+        preferred = _free_port()
+        holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        holder.bind(("127.0.0.1", preferred))
+        holder.listen(1)
+        try:
+            server = box64_web.start(preferred, _fake_snapshot, _fake_stats,
+                                     browser_pref="none")
+        except Exception:
+            holder.close()
+            raise
+        try:
+            actual = server.server_address[1]
+            # We got a different (and working) port.
+            assert actual != preferred, \
+                f"start() didn't scan past the held port {preferred}"
+            # Dashboard responds on the new port.
+            status, _ = _http_get(actual, "/")
+            assert status == 200
+            # And the user was told about the relocation.
+            out = capsys.readouterr().out
+            assert f"Port {preferred} busy" in out
+            assert f"{actual}" in out
+        finally:
+            box64_web.shutdown(server)
+            holder.close()
+
     def test_start_prints_verified_line(self, port_capsys):
         port, capture = port_capsys
         out = capture.readouterr().out

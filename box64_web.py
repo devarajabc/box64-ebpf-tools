@@ -256,18 +256,50 @@ def start(port, snapshot_fn, stats_fn, history_interval=3.0, host="127.0.0.1",
     # still in TIME_WAIT. Browsers see the resulting bind failure as
     # "page never loaded", which is the worst possible UX.
     ThreadingHTTPServer.allow_reuse_address = True
-    server = ThreadingHTTPServer((host, port), Handler)
+
+    # Auto-pick a free port: try the preferred one first, then preferred+1
+    # through preferred+19, then ask the kernel for any free port. The
+    # bind-on-success approach is race-free — whichever bind succeeds is
+    # the socket we'll keep. Replaces the pre-flight probe in
+    # box64_trace.py which had a race between probe.close() and the
+    # real ThreadingHTTPServer bind 10s later.
+    server = None
+    last_err = None
+    import errno as _errno
+    candidates = list(range(port, port + 20)) + [0]  # 0 = kernel ephemeral
+    for try_port in candidates:
+        try:
+            server = ThreadingHTTPServer((host, try_port), Handler)
+            break
+        except OSError as e:
+            last_err = e
+            # EACCES on low ports is fatal; scanning won't help.
+            if e.errno == _errno.EACCES:
+                raise
+            continue
+    if server is None:
+        raise OSError(f"box64_web: could not bind any port from {port} "
+                      f"through {port + 19} or kernel-ephemeral "
+                      f"({last_err})")
+    actual_port = server.server_address[1]
+    if actual_port != port:
+        if 0 < actual_port - port < 20:
+            print(f"[*] Port {port} busy; dashboard will use "
+                  f"{actual_port} instead.")
+        else:
+            print(f"[*] Ports {port}..{port + 19} all busy; kernel "
+                  f"assigned {actual_port}.")
     server.daemon_threads = True
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
-    url = f"http://{host}:{port}/"
+    url = f"http://{host}:{actual_port}/"
 
     # Self-test: verify the server actually responds AND that every
     # endpoint the frontend depends on returns a sane status before we
     # hand the URL to the user. If anything's broken (daemon thread
     # died, route mis-wired, snapshot_fn raised), surface it here
     # instead of letting the user discover it via a blank browser tab.
-    failures = _self_test(host, port)
+    failures = _self_test(host, actual_port)
     if failures:
         try:
             server.shutdown()
