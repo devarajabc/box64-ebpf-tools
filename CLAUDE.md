@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-eBPF/BCC uprobe-based profiling toolkit for [Box64](https://github.com/ptitSeb/box64) (Linux x86_64 emulator). Three standalone Python scripts attach to Box64's internal functions at runtime via eBPF uprobes — no recompilation needed. All require root and `python3-bcc`.
+eBPF/BCC uprobe-based profiling toolkit for [Box64](https://github.com/ptitSeb/box64) (Linux x86_64 emulator). Two standalone Python scripts attach to Box64's internal functions at runtime via eBPF uprobes — no recompilation needed. All require root and `python3-bcc`.
 
 ## Running the Tools
 
 ```bash
 sudo python3 box64_memleak.py [options]    # Memory leak detection
-sudo python3 box64_trace.py [options]      # Multi-process Steam tracer + JIT block analysis
+sudo python3 box64_trace.py [options]      # Multi-process tracer + JIT block analysis (Steam/pressure-vessel supported)
 ```
 
 Common flags: `-b BINARY` (default `/usr/local/bin/box64`), `-p PID` (0=all), `-i INTERVAL` (seconds).
@@ -26,11 +26,12 @@ Each tool follows the same pattern:
 5. **Event loop** → periodic interval summaries (+ perf event buffer polling when enabled)
 6. **Final report** → comprehensive output on Ctrl+C (histograms, top-N lists, process trees, timelines)
 
-### The Two Tools (and the shared module)
+### The Two Tools (and the shared modules)
 
-- **box64_common.py** (~270 lines): Shared helpers imported by both tools — pure-computation utilities (`correlate_thread_parents`, `compute_cow_deltas`, `rank_items`), formatters (`fmt_size`, `fmt_ns`), binary/symbol validation (`check_binary`, `check_symbols_soft`), `/proc` parsers (`read_smaps_rollup`, `read_minflt`), and BCC/kernel workarounds (`_clear_stale_uprobes`, `_patch_bcc_uretprobe`, `_bcc_has_atomic_increment`, `_rewrite_atomic_increment`). Lazy-imports `bcc` so the module is importable without BCC installed.
-- **box64_memleak.py** (~1,180 lines): Tracks `customMalloc`/`customFree`/`customCalloc`/`customRealloc` for leak detection. Optional: mmap, stack traces, 32-bit variants.
-- **box64_trace.py** (~3,000 lines): Multi-process tracer for Steam sessions. Also covers JIT block analysis: tracks `AllocDynarecMap`/`FreeDynarecMap` for churn, lifetimes, protection overhead, plus fork/exec/vfork lifecycle, per-PID memory (custom allocator + JIT + mmap + context), pressure-vessel detection, process trees, PC sampling profiling, CoW page faults.
+- **box64_common.py** (~375 lines): Shared helpers imported by both tools — pure-computation utilities (`correlate_thread_parents`, `compute_cow_deltas`, `rank_items`), formatters (`fmt_size`, `fmt_ns`), binary/symbol validation (`check_binary`, `check_symbols_soft`), `/proc` parsers (`read_smaps_rollup`, `read_minflt`), and BCC/kernel workarounds (`_clear_stale_uprobes`, `_patch_bcc_uretprobe`, `_bcc_has_atomic_increment`, `_rewrite_atomic_increment`). Lazy-imports `bcc` so the module is importable without BCC installed.
+- **box64_web.py** (~590 lines): HTTP server backing `box64_trace.py`'s built-in web dashboard (on by default; opt out with `--no-web`, override port with `--web PORT` or `$BOX64_WEB_PORT`). Exposes `/api/snapshot`, `/api/history`, `/stats`, and an SSE event stream (`emit_event`); spawns a background `_history_loop`; runs `_self_test()` on startup so a half-broken dashboard fails loudly. API contract mirrors kbox's `web/js/polling.js`.
+- **box64_memleak.py** (~1,210 lines): Tracks `customMalloc`/`customFree`/`customCalloc`/`customRealloc` for leak detection. Optional: mmap, stack traces, 32-bit variants.
+- **box64_trace.py** (~3,570 lines): General-purpose multi-process Box64 tracer. Covers JIT block analysis (tracks `AllocDynarecMap`/`FreeDynarecMap` for churn, lifetimes, protection overhead), fork/exec/vfork lifecycle, per-PID memory (custom allocator + JIT + mmap + context), process tree, PC sampling profiling, CoW page faults. Steam / pressure-vessel sessions are a supported case (uprobe on the optional `pressure_vessel` symbol annotates those PIDs in the tree) but not the only one — works on any Box64 workload.
 
 When adding a helper, check whether it already lives in `box64_common.py` — duplicating helpers across tools is what the recent refactor was undoing.
 

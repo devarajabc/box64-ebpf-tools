@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 #
-# box64_trace.py — eBPF/BCC uprobe-based multi-process tracer for Box64 + Steam.
+# box64_trace.py — eBPF/BCC uprobe-based multi-process tracer for Box64.
 # Tracks fork/exec/vfork process lifecycle, per-PID memory usage (custom allocator,
-# DynaRec JIT, mmap), context creation/destruction, and pressure-vessel detection
-# across ALL concurrent box64 instances simultaneously.
+# DynaRec JIT, mmap), context creation/destruction, and (when present) pressure-vessel
+# Steam containers across ALL concurrent box64 instances simultaneously.
 #
 # Requires: root, linux >=4.9, python3-bcc (BCC toolkit)
 #
@@ -1495,7 +1495,7 @@ def parse_args():
         argv, command = raw, []
 
     p = argparse.ArgumentParser(
-        description="Trace Box64+Steam multi-process behavior: "
+        description="Trace Box64 multi-process behavior: "
                     "fork/exec lifecycle, per-PID memory, DynaRec JIT, "
                     "mmap, and pressure-vessel detection using eBPF uprobes",
         epilog="Spawn-and-trace: append `-- COMMAND ARGS...` to launch an "
@@ -2565,7 +2565,7 @@ def main():
     def print_periodic(vals, prev_vals):
         d = [vals[i] - prev_vals[i] for i in range(32)]
 
-        print(f"\n--- {time.strftime('%H:%M:%S')} --- Box64+Steam ---")
+        print(f"\n--- {time.strftime('%H:%M:%S')} --- Box64 ---")
         print(f"  fork: {d[14]:>6}  vfork: {d[15]:>6}  exec: {d[16]:>6}"
               f"  posix_spawn: {d[17]:>6}  context_new: {d[18]:>4}  context_free: {d[19]:>4}")
 
@@ -2643,7 +2643,7 @@ def main():
     # ---- Final report ----
     def print_final_report(vals):
         print("\n" + "=" * 76)
-        print("FINAL REPORT -- Box64+Steam Multi-Process Analysis")
+        print("FINAL REPORT -- Box64 Multi-Process Analysis")
         print("=" * 76)
 
         # -- Section 1: Global totals --
