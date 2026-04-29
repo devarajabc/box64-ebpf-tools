@@ -105,10 +105,13 @@ class TestStartup:
         # Hold the preferred port so start() must scan upward to find
         # a free one. The dashboard should come up anyway, on a port
         # that's NOT the preferred one, with a clear announcement.
-        preferred = _free_port()
+        # Bind the holder directly on port 0 — going via _free_port()
+        # would re-open a TOCTOU window where another process could
+        # grab `preferred` between close() and the holder's bind().
         holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        holder.bind(("127.0.0.1", preferred))
+        holder.bind(("127.0.0.1", 0))
         holder.listen(1)
+        preferred = holder.getsockname()[1]
         try:
             server = box64_web.start(preferred, _fake_snapshot, _fake_stats,
                                      browser_pref="none")
@@ -233,10 +236,10 @@ class TestStartCallsOpenBrowser:
         captured = self._capture_open_browser(
             monkeypatch, (True, "launched stub"))
 
-        preferred = _free_port()
         holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        holder.bind(("127.0.0.1", preferred))
+        holder.bind(("127.0.0.1", 0))
         holder.listen(1)
+        preferred = holder.getsockname()[1]
         try:
             server = box64_web.start(preferred, _fake_snapshot, _fake_stats,
                                      browser_pref="firefox")
