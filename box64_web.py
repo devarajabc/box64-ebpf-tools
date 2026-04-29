@@ -53,7 +53,7 @@ def _self_test(host, port, deadline_s=3.0):
             conn.request(method, path)
             resp = conn.getresponse()
             status = resp.status
-            body = resp.read(4096)
+            body = resp.read()
             conn.close()
             if status != 200:
                 return f"{path} → HTTP {status}"
