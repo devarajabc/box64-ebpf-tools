@@ -89,7 +89,6 @@ crash behavior are documented in
 - **[`docs/box64_memleak.md`](docs/box64_memleak.md)** — options, output, required symbols for the leak detector.
 - **[`docs/box64_trace.md`](docs/box64_trace.md)** — options, output, dashboard reference, spawn mode, crash behavior.
 - **[`docs/positioning.md`](docs/positioning.md)** — why these tools exist instead of perf / valgrind.
-- **[`docs/architecture.md`](docs/architecture.md)** — project layout, shared helpers, tool pattern.
 - **[`docs/troubleshooting.md`](docs/troubleshooting.md)** — overhead, stale-uprobe and BCC workarounds, common BPF compile failures.
 - **[`docs/HOW_BOX64_WORKS.md`](docs/HOW_BOX64_WORKS.md)** — end-to-end picture of how Box64 executes an x86_64 binary.
 - **[`docs/BOX64_FORK_EXEC_MEMORY.md`](docs/BOX64_FORK_EXEC_MEMORY.md)** — fork/exec/clone, custom allocator, JIT block management, pressure-vessel.
