@@ -10,7 +10,7 @@ https://github.com/user-attachments/assets/798e7544-2e6f-4c4e-b96f-7d25e45ddc38
 
 Recorded on **Apple Silicon M1 running Linux (aarch64)**, with Box64
 executing the x86_64 build of [*Fallen Ties* by studio-laaya](https://studio-laaya.itch.io/fallen-ties)
-under `box64_trace --web`. The dashboard shows live JIT block churn,
+under `box64_trace`. The dashboard shows live JIT block churn,
 allocator throughput, and the pressure-vessel process tree as the game
 runs.
 
@@ -66,16 +66,17 @@ the browser dashboard. Stdio passes through and the tracer exits with
 the program's return code.
 
 ```bash
-sudo box64_trace -- ./MyGame.x86_64        # spawn-and-trace
+sudo box64_trace -- ./MyGame.x86_64        # spawn-and-trace (dashboard auto-opens)
 sudo box64_trace                            # attach to all running box64 processes
-sudo box64_trace --web                      # with the dashboard
+sudo box64_trace --no-web                   # tracing only, no dashboard
 sudo box64_memleak -p <PID>                 # leak detection on a running process
 ```
 
+The web dashboard is **on by default** (port 8642, or `$BOX64_WEB_PORT`);
+pass `--no-web` to disable, or `--web PORT` to pick a different port.
 Common flags: `-b BINARY` (default `/usr/local/bin/box64`, falls back
 to `which box64`), `-p PID` (`0` = all), `-i INTERVAL` (seconds),
-`--browser CMD`, `--no-web`. Press **Ctrl+C** to stop and print the
-full report.
+`--browser CMD`. Press **Ctrl+C** to stop and print the full report.
 
 You can also run from the repo without installing
 (`sudo python3 box64_trace.py …`).

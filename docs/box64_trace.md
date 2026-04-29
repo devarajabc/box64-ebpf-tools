@@ -155,8 +155,11 @@ sudo box64_trace -- box64 MyGame.x86_64                 # also fine
 
 ## Web dashboard
 
-`box64_trace.py --web [PORT]` (default port 8642) starts a local-only
-HTTP server and opens the dashboard in your default browser.
+The web dashboard is **on by default** when you run `box64_trace.py`
+— it starts a local-only HTTP server (port 8642, or `$BOX64_WEB_PORT`)
+and opens the URL in your default browser. Pass `--no-web` to disable
+it entirely, or `--web PORT` to pick a different base port (the server
+auto-scans up to 20 ports above this if the chosen one is in use).
 
 ### What the dashboard shows
 
@@ -184,9 +187,9 @@ it if auto-open misbehaves (Firefox's "profile is locked" dialog,
 headless host, sudo session boundary, etc.).
 
 ```bash
-sudo box64_trace --web --browser firefox    # explicit browser
-sudo box64_trace --web --browser none       # skip auto-open, just print URL
-BROWSER=chromium sudo -E box64_trace --web  # honors $BROWSER
+sudo box64_trace --browser firefox    # explicit browser
+sudo box64_trace --browser none       # skip auto-open, just print URL
+BROWSER=chromium sudo -E box64_trace  # honors $BROWSER
 ```
 
 Resolution order in `auto` mode (the default): `$BROWSER` (colon-list,

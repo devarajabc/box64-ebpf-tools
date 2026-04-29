@@ -9,8 +9,9 @@
   overhead.
 - Filtering by PID (`-p`) reduces overhead when multiple box64
   processes are running.
-- `--web` adds an HTTP server thread and per-event SSE fan-out; both
-  are bounded by deque/queue caps in `box64_web.py`.
+- The web dashboard (default-on; pass `--no-web` to disable) adds an
+  HTTP server thread and per-event SSE fan-out; both are bounded by
+  deque/queue caps in `box64_web.py`.
 
 ## Stale uprobe workaround
 
