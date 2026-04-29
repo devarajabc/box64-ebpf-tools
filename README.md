@@ -4,6 +4,10 @@ eBPF/BCC uprobe-based profiling tools for [Box64](https://github.com/ptitSeb/box
 They attach to Box64's internal functions at runtime — no recompilation, no
 LD_PRELOAD, minimal overhead. The tools require root and `python3-bcc`.
 
+## Demo
+
+https://github.com/devarajabc/box64-ebpf-tools/raw/main/docs/demo.webm
+
 ## Who this is for
 
 **Box64 developers and power users** debugging the emulator itself or
