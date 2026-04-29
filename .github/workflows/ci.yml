@@ -25,8 +25,12 @@ jobs:
         run: pytest tests/test_spawn_mode.py -v --tb=short
 
   bpf-compile:
-    name: BPF C compilation test
-    runs-on: ubuntu-22.04
+    name: BPF C compilation test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Install BCC

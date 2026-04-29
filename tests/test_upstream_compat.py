@@ -339,3 +339,99 @@ def test_key_function_param_counts(box64_src_dir):
             "Function signature changes detected — BPF PT_REGS_PARMn reads may be wrong:\n"
             + "\n".join(mismatches)
         )
+
+
+# ---------------------------------------------------------------------------
+# Test D: Pointer-returning functions still return a pointer
+# ---------------------------------------------------------------------------
+# Our uretprobes for these read PT_REGS_RC and treat the value as a host
+# pointer (allocator result, mmap address, JIT slab base). If upstream
+# ever changes one to return an integer / error code, the retprobe will
+# silently misinterpret the value and reports will contain bogus
+# addresses with no visible failure.
+#
+# Note: only `dynablock_t` is read by raw struct offset in our BPF code
+# (verified by grep: every `db_ptr + 0xNN` read targets a dynablock
+# field). Test B above is therefore the complete struct-layout check.
+POINTER_RETURNING_FUNCS = {
+    "customMalloc", "customCalloc", "customRealloc",
+    "customMalloc32", "customCalloc32", "customRealloc32",
+    "AllocDynarecMap",
+    "InternalMmap", "box_mmap",
+}
+
+_RETTYPE_TYPE_KEYWORDS = {
+    "int", "void", "char", "size_t", "uintptr_t", "intptr_t",
+    "uint32_t", "int32_t", "uint64_t", "int64_t",
+    "unsigned", "long", "const", "struct", "float",
+    "double", "uint8_t", "int8_t", "uint16_t",
+    "ssize_t", "off_t", "pid_t",
+}
+
+
+def _get_return_type(src_dir: Path, symbol: str) -> str | None:
+    """Return the declared return-type string for `symbol`, or None.
+
+    Greps Box64 src/ for a declaration of `symbol` and returns the
+    substring preceding the function name. Rejects assignment-like
+    lines (`x = symbol(...)`) and lines whose prefix contains no C
+    type keyword.
+    """
+    pattern = rf"\b{re.escape(symbol)}\s*\("
+    try:
+        result = subprocess.run(
+            ["grep", "-rhE", "--include=*.h", "--include=*.c",
+             pattern, str(src_dir / "src")],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+
+    name_re = re.compile(rf"^(.*?)\b{re.escape(symbol)}\s*\(")
+    for raw in result.stdout.split("\n"):
+        line = raw.strip()
+        if not line or line.startswith("//") or line.startswith("*"):
+            continue
+        m = name_re.match(line)
+        if not m:
+            continue
+        prefix = m.group(1).strip()
+        if not prefix:
+            continue
+        # Reject obvious call sites and statement fragments.
+        if any(c in prefix for c in "=,;{}"):
+            continue
+        # Must contain a recognised type keyword to count as a declaration.
+        words = set(re.findall(r"\b\w+\b", prefix))
+        if not (words & _RETTYPE_TYPE_KEYWORDS):
+            continue
+        return prefix
+
+    return None
+
+
+def test_pointer_returning_funcs_still_return_pointer(box64_src_dir):
+    """Catch silent breakage if upstream changes a pointer-returning
+    function to return int/error — our PT_REGS_RC reads would then
+    publish garbage addresses with no visible failure."""
+    mismatches = []
+    for func in sorted(POINTER_RETURNING_FUNCS):
+        rtype = _get_return_type(box64_src_dir, func)
+        if rtype is None:
+            mismatches.append(f"  {func}: declaration not found")
+            continue
+        is_pointer_like = ("*" in rtype) or bool(
+            re.search(r"\b(uintptr_t|intptr_t)\b", rtype))
+        if not is_pointer_like:
+            mismatches.append(
+                f"  {func}: return type {rtype!r} is not pointer-like"
+            )
+
+    if mismatches:
+        pytest.fail(
+            "Function return types changed — uretprobe PT_REGS_RC reads "
+            "may now misinterpret integer/error returns as pointers:\n"
+            + "\n".join(mismatches)
+        )
