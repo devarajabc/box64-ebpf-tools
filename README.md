@@ -7,6 +7,7 @@ LD_PRELOAD, minimal overhead. The tools require root and `python3-bcc`.
 ## Demo
 
 https://github.com/devarajabc/box64-ebpf-tools/raw/main/docs/demo.webm
+[good.webm](https://github.com/user-attachments/assets/09340094-d97d-48f1-8e65-7bf2620773a7)
 
 ## Who this is for
 
