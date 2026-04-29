@@ -8,6 +8,12 @@ LD_PRELOAD, minimal overhead. Linux-only, require root and `python3-bcc`.
 
 https://github.com/user-attachments/assets/798e7544-2e6f-4c4e-b96f-7d25e45ddc38
 
+Recorded on **Apple Silicon M1 running Linux (aarch64)**, with Box64
+executing the x86_64 build of [*Fallen Ties* by studio-laaya](https://studio-laaya.itch.io/fallen-ties)
+under `box64_trace --web`. The dashboard shows live JIT block churn,
+allocator throughput, and the pressure-vessel process tree as the game
+runs.
+
 ## The two tools
 
 | Tool | Purpose | Docs |
