@@ -2465,6 +2465,7 @@ def main():
     death_stats = {"count": 0, "tick_sum": 0, "isize_sum": 0, "native_size_sum": 0,
                    "dirty_count": 0, "always_test_count": 0}
     invalidation_addrs = {}   # x64_addr -> {"count": N, "isize": I, "last_hash": H}
+    invalidations_by_pid = {} # pid -> count (per-process invalidation total)
     unprot_addrs = {}         # addr -> {"count": N, "total_size": S, "mark_count": M}
 
     if track_block_detail:
@@ -2490,6 +2491,7 @@ def main():
                 entry["last_hash"] = evt.hash
             else:
                 invalidation_addrs[addr] = {"count": 1, "isize": evt.isize, "last_hash": evt.hash}
+            invalidations_by_pid[evt.pid] = invalidations_by_pid.get(evt.pid, 0) + 1
 
         b["invalidation_events"].open_perf_buffer(handle_invalidation_event, page_cnt=16)
 
@@ -2840,6 +2842,40 @@ def main():
             print(f"\n  Block Detail Analysis:")
             print(f"    Invalidations (InvalidDynablock):  {vals[29]:>10}")
             print(f"    Dirty marks (MarkDynablock):       {vals[30]:>10}")
+
+            # Per-process block / invalidation breakdown. Numbers are
+            # totals over the whole run; "live" is alloc-free (currently
+            # outstanding); "inv %" expresses invalidations as a
+            # percentage of total allocations (rate of stale-block
+            # detection). Thread TIDs are filtered out — their
+            # allocations & invalidations land on the parent's TGID row.
+            pids_with_blocks = []
+            for k, pm in b["proc_mem"].items():
+                pid = k.value
+                if pid_kind.get(pid) == "thread":
+                    continue
+                alloc = pm.jit_alloc_count
+                freed = pm.jit_free_count
+                inv = invalidations_by_pid.get(pid, 0)
+                if alloc == 0 and inv == 0:
+                    continue   # nothing to say
+                pids_with_blocks.append((pid, alloc, freed, inv))
+
+            if pids_with_blocks:
+                pids_with_blocks.sort(key=lambda r: r[1], reverse=True)
+                print(f"\n  Per-Process Block Invalidations:")
+                print(f"    {'PID':>8s}  {'Label':<32s}  "
+                      f"{'Alloc':>10s}  {'Freed':>10s}  {'Live':>10s}  "
+                      f"{'Invalidated':>11s}  {'Inv%':>6s}")
+                print(f"    {'-'*8}  {'-'*32}  "
+                      f"{'-'*10}  {'-'*10}  {'-'*10}  {'-'*11}  {'-'*6}")
+                for pid, alloc, freed, inv in pids_with_blocks:
+                    label = pid_labels.get(pid, f"pid{pid}")[:32]
+                    live = alloc - freed
+                    inv_pct = (inv / alloc * 100) if alloc > 0 else 0.0
+                    print(f"    {pid:>8d}  {label:<32s}  "
+                          f"{alloc:>10,}  {freed:>10,}  {live:>10,}  "
+                          f"{inv:>11,}  {inv_pct:>5.1f}%")
 
             # Block death profile
             if death_stats["count"] > 0:
