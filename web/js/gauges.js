@@ -255,12 +255,6 @@ var KGauges = {
         snap.histograms.block_ages, this._fmtNsRange);
     }
 
-    /* JIT Blocks per process — answers "which PID is sitting on the
-     * JIT cache?". Live = jit_count − jit_freed_count, top 5 sorted
-     * desc. Reuses the .hist-* CSS so it visually rhymes with the
-     * size/lifetime histograms below. */
-    if (snap.pids) this.renderJitPidBlocks(snap.pids);
-
     /* Cache-policy panels */
     if (snap.histograms) {
       this.renderHist('hist-alloc-sizes',
@@ -323,46 +317,6 @@ var KGauges = {
               '<div class="hist-bar" style="width:' + pct + '%"></div>' +
               '</div>' +
               '<div class="hist-count">' + this.fmtNum(b.count) + '</div>' +
-              '</div>';
-    }
-    el.innerHTML = html;
-  },
-
-  renderJitPidBlocks: function(pids) {
-    var el = document.getElementById('jit-pid-blocks');
-    if (!el) return;
-    /* Compute live = jit_count - jit_freed_count for each PID; drop
-     * rows with zero live blocks (forks that inherited but did no
-     * JIT work, idle threads, etc.) so the panel stays compact. */
-    var rows = [];
-    for (var i = 0; i < pids.length; i++) {
-      var p = pids[i];
-      var live = (p.jit_count || 0) - (p.jit_freed_count || 0);
-      if (live > 0) {
-        rows.push({pid: p.pid, label: p.label || '', live: live});
-      }
-    }
-    if (!rows.length) {
-      el.innerHTML = '<div class="hist-empty">(no live JIT blocks)</div>';
-      return;
-    }
-    rows.sort(function(a, b) { return b.live - a.live; });
-    rows = rows.slice(0, 5);   /* top 5 — keeps the panel from growing */
-    var max = rows[0].live;
-    var html = '';
-    for (i = 0; i < rows.length; i++) {
-      var r = rows[i];
-      var lab = r.label.length > 24 ? r.label.substr(0, 21) + '...' : r.label;
-      /* "PID label" as one short string fits the .hist-label slot
-       * (which the CSS keeps narrow); count in the right cell. */
-      var cell = String(r.pid) + (lab ? ' ' + lab : '');
-      var pct = Math.round(100 * r.live / max);
-      html += '<div class="hist-row">' +
-              '<div class="hist-label">' + cell + '</div>' +
-              '<div class="hist-bar-wrap">' +
-              '<div class="hist-bar" style="width:' + pct + '%"></div>' +
-              '</div>' +
-              '<div class="hist-count">' + this.fmtNum(r.live) + '</div>' +
               '</div>';
     }
     el.innerHTML = html;
