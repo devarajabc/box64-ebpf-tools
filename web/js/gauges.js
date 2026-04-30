@@ -60,18 +60,39 @@ var KGauges = {
       if (label.length > 32) label = label.substr(0, 29) + '...';
       var dangerCls = p.jit_bytes > 1024*1024*1024 ? ' class="row-danger"' :
                       (p.jit_bytes > 256*1024*1024 ? ' class="row-warn"' : '');
+      /* Live blocks = alloc - freed (JIT). Older snapshots before the
+       * jit_freed_count field landed will leave it undefined; fall back
+       * to "—" instead of NaN. */
+      var liveCell, invCell, invPctCell;
+      if (typeof p.jit_freed_count === 'number') {
+        var live = p.jit_count - p.jit_freed_count;
+        liveCell = this.fmtNum(live);
+      } else {
+        liveCell = '—';
+      }
+      if (typeof p.jit_invalidations === 'number') {
+        invCell = this.fmtNum(p.jit_invalidations);
+        var pct = p.jit_count > 0 ? (p.jit_invalidations / p.jit_count * 100) : 0;
+        invPctCell = pct.toFixed(1) + '%';
+      } else {
+        invCell = '—';
+        invPctCell = '—';
+      }
       rows += '<tr' + dangerCls + '>' +
               '<td>' + p.pid + '</td>' +
               '<td>' + label + '</td>' +
               '<td class="num">' + p.threads_alive + '</td>' +
               '<td class="num">' + this.fmtBytes(p.jit_bytes) + '</td>' +
               '<td class="num">' + this.fmtNum(p.jit_count) + '</td>' +
+              '<td class="num">' + liveCell + '</td>' +
+              '<td class="num">' + invCell + '</td>' +
+              '<td class="num">' + invPctCell + '</td>' +
               '<td class="num">' + this.fmtBytes(p.malloc_bytes) + '</td>' +
               '<td class="num">' + this.fmtBytes(p.mmap_bytes) + '</td>' +
               '<td class="num">' + p.context_created + '</td>' +
               '</tr>';
     }
-    tbody.innerHTML = rows || '<tr><td colspan="8" class="empty">no box64 processes seen yet</td></tr>';
+    tbody.innerHTML = rows || '<tr><td colspan="11" class="empty">no box64 processes seen yet</td></tr>';
   },
 
   update: function(snap, prev) {

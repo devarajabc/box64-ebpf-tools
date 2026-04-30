@@ -59,7 +59,8 @@ def _fake_snapshot():
                     "destroy_entry": 0, "fork_entry": 0, "clone_entry": 0},
         # `pids` is a list of per-PID rows — JS does pids[i] / pids.length.
         "pids": [{"pid": 123, "label": "test", "jit_bytes": 512,
-                  "jit_count": 5, "malloc_bytes": 4096, "mmap_bytes": 0,
+                  "jit_count": 5, "jit_freed_count": 2, "jit_invalidations": 1,
+                  "malloc_bytes": 4096, "mmap_bytes": 0,
                   "threads_alive": 1, "context_created": 1}],
         "histograms": {"alloc_sizes": {}, "block_lifetimes": {}},
         "top_blocks": [], "top_churned": [],

@@ -60,6 +60,7 @@ THREADS_KEYS = {"create_entry", "create_return", "start_entry",
 
 # JS gauges.js::renderPidTable iterates pids[i]; these are the fields it reads
 PID_ROW_REQUIRED = {"pid", "label", "jit_bytes", "jit_count",
+                    "jit_freed_count", "jit_invalidations",
                     "malloc_bytes", "mmap_bytes",
                     "threads_alive", "context_created"}
 
@@ -172,6 +173,7 @@ def _good_snapshot():
                     "fork_entry": 0, "clone_entry": 0},
         "pids": [{"pid": 4242, "label": "box64",
                   "jit_bytes": 4096, "jit_count": 1,
+                  "jit_freed_count": 0, "jit_invalidations": 0,
                   "malloc_bytes": 32, "mmap_bytes": 0,
                   "threads_alive": 1, "context_created": 1}],
         "histograms": {"alloc_sizes": {}, "block_lifetimes": {}},

@@ -81,7 +81,10 @@
           <th>PID</th><th>Label</th>
           <th class="num">Threads</th>
           <th class="num">JIT bytes</th>
-          <th class="num">JIT allocs</th>
+          <th class="num" title="Total JIT block allocations">JIT allocs</th>
+          <th class="num" title="JIT blocks currently outstanding (alloc - free)">Live blocks</th>
+          <th class="num" title="Times InvalidDynablock fired for this PID">Invalidated</th>
+          <th class="num" title="Invalidations as a percentage of total allocations">Inv %</th>
           <th class="num">Malloc bytes</th>
           <th class="num">mmap bytes</th>
           <th class="num">Contexts</th>

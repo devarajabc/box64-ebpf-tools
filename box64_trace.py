@@ -2581,6 +2581,8 @@ def main():
                     "free_count": pm.free_count,
                     "jit_bytes": pm.jit_alloc_bytes - pm.jit_free_bytes,
                     "jit_count": pm.jit_alloc_count,
+                    "jit_freed_count": pm.jit_free_count,
+                    "jit_invalidations": invalidations_by_pid.get(pid, 0),
                     "mmap_bytes": pm.mmap_bytes + pm.box_mmap_bytes,
                     "threads_alive": threads_per_pid.get(pid, 0),
                     "context_created": pm.context_created,
