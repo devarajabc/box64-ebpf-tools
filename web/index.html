@@ -87,7 +87,7 @@
           <th class="num" title="Invalidations as a percentage of total allocations">Inv %</th>
           <th class="num">Malloc bytes</th>
           <th class="num">mmap bytes</th>
-          <th class="num">Contexts</th>
+          <th class="num" title="NewBox64Context() calls — number of box64context_t emulator-state structs created in this PID. Normally 1 for a main process and 0 for forked children (which inherit the parent's context via CoW).">Box64Ctx</th>
         </tr>
       </thead>
       <tbody id="pid-tbody"></tbody>

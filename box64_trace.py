@@ -3204,7 +3204,12 @@ def main():
                     print(f"      mmap: {v.box_mmap_count:>10}  munmap: {v.box_munmap_count:>10}  "
                           f"total mapped: {fmt_size(v.box_mmap_bytes):>12}")
 
-                print(f"    Context: {v.context_created} created  /  {v.context_freed} freed")
+                # NewBox64Context() / FreeBox64Context() — the per-emulator
+                # state struct (maplib, bridges, vsyscalls, DynaRec setup).
+                # 1 created is the normal main-process pattern; 0 means a
+                # forked child that inherited the parent's context via CoW.
+                print(f"    Box64Context: {v.context_created} created  /  "
+                      f"{v.context_freed} freed")
 
                 # Latest smaps
                 smaps = read_smaps_rollup(pid)
