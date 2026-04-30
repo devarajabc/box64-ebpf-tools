@@ -166,6 +166,29 @@ def read_minflt(pid):
         return 0
 
 
+def read_tgid(pid):
+    """Return the TGID for the kernel task `pid`, or None if it's gone.
+
+    The kernel `sched_process_fork` tracepoint fires for both real fork()
+    and clone(CLONE_THREAD) (i.e. pthread_create). Its `child_pid` field
+    is a kernel TID, NOT a TGID — for thread clones, child_pid is the
+    new thread's TID, distinct from its TGID. Comparing the TID we got
+    from the tracepoint against `read_tgid(tid)` lets us tell:
+
+      tgid == pid          → real process (fork or main thread of one)
+      tgid != pid (number) → thread clone (TID under another TGID)
+      tgid is None         → task already exited; cannot classify
+    """
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("Tgid:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # BCC / kernel workarounds
 # ---------------------------------------------------------------------------

@@ -1,7 +1,8 @@
-"""Tests for /proc parsing helpers: read_smaps_rollup, read_minflt, read_proc_cmdline."""
+"""Tests for /proc parsing helpers: read_smaps_rollup, read_minflt, read_proc_cmdline, read_tgid."""
 import pytest
 from unittest.mock import mock_open, patch
 
+import box64_common
 import box64_memleak
 import box64_trace
 
@@ -116,3 +117,86 @@ class TestReadProcCmdline:
 
     def test_memleak_has_no_read_proc_cmdline(self):
         assert not hasattr(box64_memleak, "read_proc_cmdline")
+
+
+# ---------------------------------------------------------------------------
+# read_tgid — distinguishes thread TIDs from real process TGIDs.
+# Critical for filtering CLONE_THREAD entries out of the per-PID breakdown.
+# ---------------------------------------------------------------------------
+
+class TestReadTgid:
+    # /proc/PID/status format — `Tgid:` is one of dozens of lines; assertions
+    # below use representative status content rather than hand-crafted minimal
+    # files so the parser is exercised against realistic inputs.
+    REAL_PROCESS_STATUS = """\
+Name:\tbash
+Umask:\t0022
+State:\tS (sleeping)
+Tgid:\t12345
+Ngid:\t0
+Pid:\t12345
+PPid:\t1
+"""
+
+    THREAD_TID_STATUS = """\
+Name:\tworker
+State:\tS (sleeping)
+Tgid:\t12345
+Ngid:\t0
+Pid:\t12378
+PPid:\t1
+"""
+
+    def test_real_process_tgid_equals_pid(self):
+        # Main thread / real fork child: Tgid == Pid.
+        m = mock_open(read_data=self.REAL_PROCESS_STATUS)
+        with patch("builtins.open", m):
+            tgid = box64_common.read_tgid(12345)
+        assert tgid == 12345
+
+    def test_thread_tid_returns_parents_tgid(self):
+        # Thread: Tgid is the PARENT process's Tgid, not the thread's TID.
+        # Caller compares tgid != pid to identify thread clones.
+        m = mock_open(read_data=self.THREAD_TID_STATUS)
+        with patch("builtins.open", m):
+            tgid = box64_common.read_tgid(12378)
+        assert tgid == 12345
+        assert tgid != 12378
+
+    def test_missing_proc_returns_none(self):
+        # Process exited before we got to /proc — can't classify.
+        with patch("builtins.open", side_effect=FileNotFoundError):
+            assert box64_common.read_tgid(99999) is None
+
+    def test_permission_denied_returns_none(self):
+        # /proc/PID may be readable for the user but blocked under e.g.
+        # hidepid=1. read_tgid should not propagate the OSError.
+        with patch("builtins.open", side_effect=PermissionError):
+            assert box64_common.read_tgid(99999) is None
+
+    def test_tgid_line_missing_returns_none(self):
+        # Defensive: if the kernel ever changes /proc/status format and
+        # drops the Tgid line, we return None rather than crashing.
+        m = mock_open(read_data="Name:\tfoo\nState:\tR\n")
+        with patch("builtins.open", m):
+            assert box64_common.read_tgid(12345) is None
+
+    def test_malformed_tgid_value_returns_none(self):
+        # Tgid: <something not an int> — don't crash.
+        m = mock_open(read_data="Name:\tfoo\nTgid:\tbogus\n")
+        with patch("builtins.open", m):
+            assert box64_common.read_tgid(12345) is None
+
+    def test_classification_use_in_caller(self):
+        # Document the expected pattern callers use to classify entries.
+        # This is the contract _per_pid_snapshot relies on.
+        m_proc = mock_open(read_data=self.REAL_PROCESS_STATUS)
+        with patch("builtins.open", m_proc):
+            assert box64_common.read_tgid(12345) == 12345  # → "process"
+
+        m_thr = mock_open(read_data=self.THREAD_TID_STATUS)
+        with patch("builtins.open", m_thr):
+            assert box64_common.read_tgid(12378) != 12378  # → "thread"
+
+        with patch("builtins.open", side_effect=FileNotFoundError):
+            assert box64_common.read_tgid(99999) is None   # → "unknown"

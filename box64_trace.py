@@ -1585,6 +1585,7 @@ from box64_common import (
     check_symbols_soft,
     read_smaps_rollup,
     read_minflt,
+    read_tgid,
     _clear_stale_uprobes,
     _patch_bcc_uretprobe,
     _bcc_has_atomic_increment,
@@ -2200,6 +2201,17 @@ def main():
     timeline = []
     proc_children = {}     # parent_pid -> [child_pid, ...]
     pid_labels = {}        # pid -> string
+    # Each `tid` we observe via sched_process_fork — could be either a
+    # real fork child (its TID happens to equal its new TGID) or a thread
+    # clone (CLONE_THREAD: TID under the parent's TGID). proc_mem entries
+    # for thread clones never receive any allocations because customMalloc
+    # & friends key on TGID — they all fall through to the parent's row.
+    # We classify each entry once, immediately after the fork event, while
+    # /proc/TID is still live. See _classify_pid below.
+    #   "process" → real fork child (TGID == TID)
+    #   "thread"  → CLONE_THREAD spawn (TGID != TID), spurious zero row
+    #   "unknown" → /proc/TID was already gone when we tried to read
+    pid_kind = {}          # pid -> "process" | "thread" | "unknown"
     # Set later by --web; read by handle_lifecycle_event for SSE emission.
     _web_emit = None
     smaps_history = {}     # pid -> [(monotonic_time, smaps_dict), ...]
@@ -2339,10 +2351,22 @@ def main():
             if evt.child_pid not in pid_labels:
                 # Inherit parent label until child does exec
                 pid_labels[evt.child_pid] = pid_labels.get(pid, f"pid{evt.child_pid}")
+            # Classify the new TID right now while /proc/TID is fresh.
+            # If we wait until snapshot/FINAL REPORT time, short-lived
+            # threads will be gone and we'd be left with "unknown" rows.
+            if evt.child_pid not in pid_kind:
+                tgid = read_tgid(evt.child_pid)
+                if tgid is None:
+                    pid_kind[evt.child_pid] = "unknown"
+                elif tgid == evt.child_pid:
+                    pid_kind[evt.child_pid] = "process"
+                else:
+                    pid_kind[evt.child_pid] = "thread"
             if _web_emit:
                 _web_emit('process', {
                     "action": "fork", "pid": pid, "child_pid": evt.child_pid,
-                    "label": pid_labels.get(pid, "")
+                    "label": pid_labels.get(pid, ""),
+                    "kind": pid_kind.get(evt.child_pid, "unknown"),
                 })
 
         elif etype in (4, 5, 6, 7):  # exec* — update label to target binary
@@ -2525,9 +2549,13 @@ def main():
         """Per-PID breakdown read from proc_mem BPF hash + thread_stats.
 
         Builds a list of {pid, label, malloc_bytes, jit_bytes, mmap_bytes,
-        threads_alive} for the dashboard table.
+        threads_alive} for the dashboard table. Skips entries that
+        sched_process_fork created for thread clones (CLONE_THREAD): those
+        rows can't ever receive allocations because customMalloc & friends
+        key on TGID, not TID — they'd just be perpetual zeros.
         """
         rows = []
+        threads_filtered = 0
         # Count threads alive per pid by iterating active_threads (tid -> thread_info)
         threads_per_pid = {}
         if track_threads:
@@ -2539,9 +2567,13 @@ def main():
         try:
             for k, pm in b["proc_mem"].items():
                 pid = k.value
+                if pid_kind.get(pid) == "thread":
+                    threads_filtered += 1
+                    continue
                 rows.append({
                     "pid": pid,
                     "label": pid_labels.get(pid, ""),
+                    "kind": pid_kind.get(pid, "unknown"),
                     "malloc_bytes": pm.malloc_bytes - pm.free_bytes,
                     "malloc_count": pm.malloc_count,
                     "free_count": pm.free_count,
@@ -2555,7 +2587,12 @@ def main():
             pass
         # Sort by JIT bytes desc — heaviest emulator process first
         rows.sort(key=lambda r: r["jit_bytes"], reverse=True)
+        # Stash the filter count on the closure so web_snapshot can read
+        # it without changing the public list-shape the frontend expects.
+        _per_pid_snapshot.last_threads_filtered = threads_filtered
         return rows[:32]   # cap to keep payload small
+
+    _per_pid_snapshot.last_threads_filtered = 0
 
     def web_snapshot():
         v = read_stats()
@@ -2600,6 +2637,7 @@ def main():
                 "fork_entry": tc[4], "clone_entry": tc[5],
             },
             "pids": _per_pid_snapshot(),
+            "pids_threads_filtered": _per_pid_snapshot.last_threads_filtered,
             "histograms": {
                 "alloc_sizes": _hist_snapshot("alloc_sizes"),
                 "block_lifetimes": _hist_snapshot("block_lifetimes"),
@@ -3075,14 +3113,27 @@ def main():
                 print(f"  {rel_s:>9.3f}s  {pid:>7}  {name:>18s}  {details}")
 
         # -- Section 4: Per-PID memory breakdown --
+        # sched_process_fork fires for clone(CLONE_THREAD) too, so proc_mem
+        # ends up with one entry per thread TID. Those entries can never
+        # accumulate any allocations (customMalloc keys on TGID), so they
+        # show as perpetual zero rows. Filter them out and show a count.
         proc_mem_table = b["proc_mem"]
         per_pid_data = {}
+        threads_filtered = 0
         for k, v in proc_mem_table.items():
             pid = k.value
+            if pid_kind.get(pid) == "thread":
+                threads_filtered += 1
+                continue
             per_pid_data[pid] = v
 
         if per_pid_data:
             print(f"\n  Per-PID Memory Breakdown:")
+            if threads_filtered:
+                print(f"  ({threads_filtered} thread TIDs hidden — these are "
+                      f"clone(CLONE_THREAD) entries that never receive "
+                      f"allocations because customMalloc keys on TGID. Their "
+                      f"allocator activity is folded into the parent's row.)")
             for pid in sorted(per_pid_data.keys()):
                 v = per_pid_data[pid]
                 label = pid_labels.get(pid, f"pid{pid}")
