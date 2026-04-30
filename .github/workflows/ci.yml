@@ -38,6 +38,20 @@ jobs:
       - name: Compile all BPF programs
         run: sudo python3 tests/test_bpf_compile.py
 
+  js-lint:
+    name: JS syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: node --check on every file we own under web/js/
+        run: |
+          for f in web/js/*.js; do
+            case "$f" in
+              web/js/chart.umd.min.js) continue ;;  # vendored Chart.js
+            esac
+            node --check "$f"
+          done
+
   upstream-compat:
     runs-on: ubuntu-latest
     steps:

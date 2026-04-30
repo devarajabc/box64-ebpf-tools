@@ -19,12 +19,17 @@ satisfy them too, or it isn't a faithful stand-in.
 import http.client
 import json
 import queue
+import re
 import socket
 import time
+from pathlib import Path
 
 import pytest
 
 import box64_web
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+JS_DIR = REPO_ROOT / "web" / "js"
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +248,27 @@ class TestSnapshotContract:
         assert resp.status == 200
         snap = json.loads(body)
         _assert_dashboard_snapshot(snap)
+
+    def test_js_only_reads_known_top_level_snapshot_keys(self):
+        """Every `snap.X` access in web/js/*.js must be a key our Python
+        contract emits. Catches the case where JS adds a new top-level
+        key but Python doesn't produce it (renders blank / undefined in
+        the dashboard with no Python-side test failure)."""
+        pattern = re.compile(r"\bsnap\.([A-Za-z_][A-Za-z0-9_]*)\b")
+        used = set()
+        for js in sorted(JS_DIR.glob("*.js")):
+            if js.name == "chart.umd.min.js":
+                continue   # vendored Chart.js
+            for m in pattern.finditer(js.read_text()):
+                used.add(m.group(1))
+
+        assert used, "no `snap.X` accesses found in web/js/ — grep regression?"
+        unknown = used - TOP_LEVEL_KEYS
+        assert not unknown, (
+            f"JS reads snap keys not in the Python contract: "
+            f"{sorted(unknown)}. Either Python web_snapshot() needs to "
+            f"emit them, or JS is reading keys that no longer exist."
+        )
 
 
 class TestHistoryShape:
