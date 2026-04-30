@@ -247,12 +247,25 @@ struct proc_mem_t {
     // variant customMemAligned32 is not currently probed):
     u64 aligned_count;
     u64 aligned_bytes;
-    // customFree on a pointer we never observed allocated. Includes pre-existing
-    // allocations from before we attached, so most useful as a relative metric.
+    // customFree on a pointer we never observed allocated. Gated on
+    // first_alloc_ns to suppress the warm-up burst where every free is
+    // technically a "stray" because we haven't observed any allocs yet
+    // for this PID. Once the first alloc is seen, post-warm-up strays
+    // remain a useful (but still noisy) signal — see free_entry below.
     u64 stray_free_count;
+    // Set on the first successful alloc observed on this PID (in nanoseconds
+    // since boot, via bpf_ktime_get_ns). Zero means "we haven't seen this
+    // PID allocate anything yet". Used to gate stray_free_count: a free
+    // before any alloc is almost always a pre-attach allocation being
+    // released, not a real stray.
+    u64 first_alloc_ns;
     // InternalMmap / box_mmap calls observed while inside a customMalloc-family
     // entry (slab exhausted, n_blocks++, fresh backing region mapped). Detected
-    // via the per-tid custommem_depth flag below.
+    // via the per-tid custommem_depth flag below. The two underlying paths
+    // are disjoint in upstream custommem.c — InternalMmap backs 64-bit slab
+    // regions, box_mmap backs the 32-bit (MAP_32BIT) variant — so a single
+    // slab grow only fires one of the two probes. If upstream ever unifies
+    // the paths this becomes a silent 2× over-count; revisit then.
     u64 slab_grow_count;
 };
 
@@ -849,6 +862,11 @@ int malloc_return(struct pt_regs *ctx) {
             __sync_fetch_and_add(&pm->malloc_count, 1);
         }
         __sync_fetch_and_add(&pm->malloc_bytes, p->size);
+        // Stamp first-alloc timestamp once. Used by free_entry to gate
+        // stray_free_count and avoid the warm-up false positive.
+        if (pm->first_alloc_ns == 0) {
+            pm->first_alloc_ns = bpf_ktime_get_ns();
+        }
     }
     inc_stat(p->type == 1 ? 2 : 0, 1);
     inc_stat(4, p->size);
@@ -887,13 +905,19 @@ int free_entry(struct pt_regs *ctx) {
 #endif
         malloc_blocks.delete(&ptr);
     } else {
-        // We never observed this ptr being allocated. Causes:
+        // We never observed this ptr being allocated. Three cases:
         //   - real "block not found in p_blocks" stray free (custommem.c:1123)
         //   - free of an allocation made before our probes attached
-        //   - hash-table eviction of a long-lived allocation
-        // Most useful as a relative metric (a sudden jump indicates a buggy
-        // free pattern in the guest or a custommem corruption).
-        if (pm) __sync_fetch_and_add(&pm->stray_free_count, 1);
+        //   - hash-table eviction of a long-lived allocation under
+        //     --hash-capacity pressure
+        // The first_alloc_ns gate eliminates the most common false-positive
+        // source: a PID whose pre-attach allocations are getting freed
+        // during our warm-up window (we'd otherwise count every free as
+        // a stray until the program happens to allocate something new).
+        // Only count strays after we've observed the PID actually allocate.
+        if (pm && pm->first_alloc_ns != 0) {
+            __sync_fetch_and_add(&pm->stray_free_count, 1);
+        }
     }
 
     if (pm) __sync_fetch_and_add(&pm->free_count, 1);
@@ -965,7 +989,12 @@ int realloc_return(struct pt_regs *ctx) {
     if (new_ptr != 0) {
         struct malloc_block_t blk = { .size = p->size, .pid = pid };
         malloc_blocks.update(&new_ptr, &blk);
-        if (pm) __sync_fetch_and_add(&pm->malloc_bytes, p->size);
+        if (pm) {
+            __sync_fetch_and_add(&pm->malloc_bytes, p->size);
+            if (pm->first_alloc_ns == 0) {
+                pm->first_alloc_ns = bpf_ktime_get_ns();
+            }
+        }
         inc_stat(4, p->size);
 #ifdef TRACK_THREADS
         update_thread_alloc(p->size);
@@ -1019,6 +1048,9 @@ int aligned_entry(struct pt_regs *ctx) {
     if (pm) {
         __sync_fetch_and_add(&pm->aligned_count, 1);
         __sync_fetch_and_add(&pm->aligned_bytes, size);
+        if (pm->first_alloc_ns == 0) {
+            pm->first_alloc_ns = bpf_ktime_get_ns();
+        }
     }
     // Also feed the size histogram so aligned allocations are visible there.
     int ab = log2_u64(size);
@@ -2037,6 +2069,23 @@ def main():
             print(f"WARNING: allocator symbols missing: {', '.join(missing_mem)}; disabling memory tracking.")
             args.no_mem = True
 
+    # Optional allocator-tier symbols. If any are missing the rest of the
+    # allocator metrics still work — we just skip that one probe. Detected
+    # up-front via check_symbols_soft so attach failures below stay narrow:
+    # any exception from attach_uprobe on a *known-present* symbol is a real
+    # error (perm denied, BPF verifier rejection, kernel ABI skew) and
+    # should propagate, not get swallowed under "old box64 build".
+    if not args.no_mem:
+        present_tier_syms = set()
+        for sym in ("map64_customMalloc", "map128_customMalloc",
+                    "customMemAligned"):
+            if not check_symbols_soft(binary, [sym]):
+                present_tier_syms.add(sym)
+            else:
+                print(f"INFO: {sym} not present in {binary} — corresponding "
+                      f"tier metric will read 0. (Older box64 build or "
+                      f"stripped binary.)")
+
     # DynaRec symbols
     if not args.no_dynarec:
         jit_syms = ["AllocDynarecMap", "FreeDynarecMap"]
@@ -2269,26 +2318,19 @@ def main():
         probe_count += 7
         # Slab-tier breakdown probes — count which size class each
         # allocation lands in. These are box64-internal helpers (file-local
-        # in custommem.c but visible in `nm` as text symbols).
+        # in custommem.c but visible in `nm` as text symbols). The
+        # symbol-presence check above already filtered the missing ones,
+        # so any failure HERE is a real attachment error worth surfacing.
         for sym, fn in (("map64_customMalloc",  "tier64_entry"),
                         ("map128_customMalloc", "tier128_entry"),
                         ("customMemAligned",    "aligned_entry")):
-            try:
+            if sym in present_tier_syms:
                 b.attach_uprobe(name=binary, sym=sym, fn_name=fn)
                 probe_count += 1
-            except Exception as e:
-                # Older box64 builds (or stripped binaries) may lack these
-                # exact symbol names. Skip with a hint rather than aborting
-                # the whole tracer — the rest of the allocator metrics
-                # still work without the tier breakdown.
-                print(f"WARNING: could not attach {sym}: {e} — "
-                      f"tier breakdown for this symbol will be unavailable.")
-        try:
+        if "customMemAligned" in present_tier_syms:
             b.attach_uretprobe(name=binary, sym="customMemAligned",
                                fn_name="aligned_return")
             probe_count += 1
-        except Exception:
-            pass
 
     # ---- DynaRec JIT probes ----
     if not args.no_dynarec:
