@@ -44,7 +44,9 @@
     <div class="panel-stats">
       <span>malloc: <b id="s-malloc">0</b></span>
       <span>free: <b id="s-free">0</b></span>
-      <span>bytes: <b id="s-bytes">0</b></span>
+      <span title="Cumulative bytes returned by customMalloc/Calloc/Realloc">allocated: <b id="s-bytes">0</b></span>
+      <span title="Cumulative bytes released by customFree (and the old-block half of customRealloc)">freed: <b id="s-bytes-freed">0</b></span>
+      <span title="allocated − freed: positive means net memory growth, useful as a leak indicator">net: <b id="s-bytes-net">0</b></span>
     </div>
   </section>
 
@@ -65,12 +67,33 @@
       <span>fork: <b id="s-fork">0</b></span>
       <span>vfork: <b id="s-vfork">0</b></span>
       <span>exec: <b id="s-exec">0</b></span>
+      <span title="posix_spawn / posix_spawnp — Steam and pressure-vessel use these heavily">spawn: <b id="s-spawn">0</b></span>
+      <span title="pressure_vessel() detections — Steam Linux Runtime container handoffs">pv: <b id="s-pv">0</b></span>
+      <span title="NewBox64Context / FreeBox64Context — emulator state structs created/freed">ctx: <b id="s-ctx-new">0</b>/<b id="s-ctx-free">0</b></span>
     </div>
   </section>
 
   <section class="panel" id="p-prot">
     <h2>JIT Protection</h2>
     <canvas id="c-prot" height="180"></canvas>
+  </section>
+
+  <section class="panel" id="p-mmap">
+    <h2>mmap Activity</h2>
+    <div class="kpis">
+      <div class="kpi" title="Internal mmap calls — box64's own bookkeeping (DynaRec maps, ELF segments)">
+        <div class="kpi-label">internal_mmap</div>
+        <div class="kpi-val" id="s-mmap-internal">0</div></div>
+      <div class="kpi" title="Internal munmap calls">
+        <div class="kpi-label">internal_munmap</div>
+        <div class="kpi-val" id="s-munmap-internal">0</div></div>
+      <div class="kpi" title="Guest-issued mmap (the x86 program calling mmap, routed through box_mmap)">
+        <div class="kpi-label">box_mmap</div>
+        <div class="kpi-val" id="s-mmap-box">0</div></div>
+      <div class="kpi" title="Guest-issued munmap">
+        <div class="kpi-label">box_munmap</div>
+        <div class="kpi-val" id="s-munmap-box">0</div></div>
+    </div>
   </section>
 
   <section class="panel wide" id="p-pids">

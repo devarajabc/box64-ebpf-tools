@@ -136,7 +136,18 @@ var KGauges = {
     if (snap.alloc) {
       document.getElementById('s-malloc').textContent = snap.alloc.malloc;
       document.getElementById('s-free').textContent = snap.alloc.free;
-      document.getElementById('s-bytes').textContent = this.fmtNum(snap.alloc.bytes_allocated);
+      document.getElementById('s-bytes').textContent = this.fmtBytes(snap.alloc.bytes_allocated);
+      var freed = snap.alloc.bytes_freed || 0;
+      var net = (snap.alloc.bytes_allocated || 0) - freed;
+      var freedEl = document.getElementById('s-bytes-freed');
+      var netEl = document.getElementById('s-bytes-net');
+      if (freedEl) freedEl.textContent = this.fmtBytes(freed);
+      if (netEl) {
+        /* Net is signed — fmtBytes only handles non-negative. Render the
+         * sign separately so a negative net (over-free, unusual) is
+         * obvious without breaking the formatter. */
+        netEl.textContent = (net < 0 ? '-' : '') + this.fmtBytes(Math.abs(net));
+      }
     }
     if (snap.jit) {
       document.getElementById('s-jit-alloc').textContent = snap.jit.alloc_count;
@@ -147,6 +158,24 @@ var KGauges = {
       document.getElementById('s-fork').textContent = snap.process.fork;
       document.getElementById('s-vfork').textContent = snap.process.vfork;
       document.getElementById('s-exec').textContent = snap.process.exec;
+      var spawnEl = document.getElementById('s-spawn');
+      var pvEl = document.getElementById('s-pv');
+      var ctxNewEl = document.getElementById('s-ctx-new');
+      var ctxFreeEl = document.getElementById('s-ctx-free');
+      if (spawnEl) spawnEl.textContent = snap.process.posix_spawn || 0;
+      if (pvEl) pvEl.textContent = snap.process.pressure_vessel || 0;
+      if (ctxNewEl) ctxNewEl.textContent = snap.process.new_context || 0;
+      if (ctxFreeEl) ctxFreeEl.textContent = snap.process.free_context || 0;
+    }
+    if (snap.mmap) {
+      var mmiEl = document.getElementById('s-mmap-internal');
+      var muiEl = document.getElementById('s-munmap-internal');
+      var mbEl  = document.getElementById('s-mmap-box');
+      var mubEl = document.getElementById('s-munmap-box');
+      if (mmiEl) mmiEl.textContent = this.fmtNum(snap.mmap.internal_mmap || 0);
+      if (muiEl) muiEl.textContent = this.fmtNum(snap.mmap.internal_munmap || 0);
+      if (mbEl)  mbEl.textContent  = this.fmtNum(snap.mmap.box_mmap || 0);
+      if (mubEl) mubEl.textContent = this.fmtNum(snap.mmap.box_munmap || 0);
     }
 
     /* Cache-policy panels */
