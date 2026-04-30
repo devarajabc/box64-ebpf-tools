@@ -96,10 +96,16 @@ var KGauges = {
   },
 
   update: function(snap, prev) {
-    /* Allocator rate (malloc + calloc + realloc + JIT alloc per second) */
+    /* Allocator rate: customMalloc + customCalloc + customRealloc +
+     * customMemAligned + AllocDynarecMap, all per second. The aligned
+     * cumulative count lives at tier_totals.aligned_count (no separate
+     * top-level alloc.aligned field). Without this term the gauge
+     * undercounted real allocation activity on workloads that hit
+     * posix_memalign / aligned_alloc paths. */
     var allocRate = KState.rate(snap, prev, 'alloc.malloc') +
                     KState.rate(snap, prev, 'alloc.calloc') +
                     KState.rate(snap, prev, 'alloc.realloc') +
+                    KState.rate(snap, prev, 'tier_totals.aligned_count') +
                     KState.rate(snap, prev, 'jit.alloc_count');
     document.getElementById('g-allocs-val').textContent = this.fmtNum(allocRate);
     this.drawArc('g-allocs-arc', Math.min(allocRate / 5000, 1));
