@@ -65,6 +65,10 @@ def _fake_snapshot():
                   "tier64_count": 3, "tier128_count": 1,
                   "aligned_count": 0, "aligned_bytes": 0,
                   "stray_free_count": 0, "slab_grow_count": 0}],
+        "tier_totals": {"tier64": 3, "tier128": 1, "list": 1,
+                        "tier64_pct": 60.0, "tier128_pct": 20.0, "list_pct": 20.0,
+                        "aligned_count": 0, "aligned_bytes": 0,
+                        "stray_free": 0, "slab_grow": 0},
         "histograms": {"alloc_sizes": {}, "block_lifetimes": {}},
         "top_blocks": [], "top_churned": [],
     }

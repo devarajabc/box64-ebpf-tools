@@ -243,7 +243,8 @@ struct proc_mem_t {
     //   tier LIST count is derived: malloc_count - tier64 - tier128
     u64 tier64_count;
     u64 tier128_count;
-    // customMemAligned / customMemAligned32 (posix_memalign / aligned_alloc paths):
+    // customMemAligned (posix_memalign / aligned_alloc path; the 32-bit
+    // variant customMemAligned32 is not currently probed):
     u64 aligned_count;
     u64 aligned_bytes;
     // customFree on a pointer we never observed allocated. Includes pre-existing
@@ -259,8 +260,11 @@ BPF_HASH(proc_mem, u32, struct proc_mem_t, 256);
 
 // Per-tid flag: nonzero whenever we're inside customMalloc / customCalloc /
 // customRealloc / customMemAligned. Lets us detect when InternalMmap/box_mmap
-// is called for a slab grow vs. for an unrelated reason.
-BPF_HASH(custommem_depth, u64, u64, 4096);
+// is called for a slab grow vs. for an unrelated reason. Sized off the same
+// --hash-capacity knob as malloc_blocks / jit_blocks; under heavy threaded
+// workloads this avoids silently dropping update()s (which would look
+// identical to "no slab grow happened" — the worst failure mode).
+BPF_HASH(custommem_depth, u64, u64, HASH_CAPACITY);
 
 static inline struct proc_mem_t *get_or_init_proc_mem(u32 pid) {
     struct proc_mem_t *pm = proc_mem.lookup(&pid);
@@ -780,7 +784,15 @@ int calc_stack_return(struct pt_regs *ctx) {
 // Helpers for the slab-grow detector. Mark "we're inside customMalloc-family"
 // at entry; clear at return. InternalMmap / box_mmap entry probes check this
 // flag to attribute a "fresh slab" mmap to the customMalloc path that needed it.
+//
+// custommem_enter() clears the flag *before* setting it: BCC uretprobes can
+// drop on aarch64 (see _patch_bcc_uretprobe in box64_common.py), and any path
+// that returns without firing our matching uretprobe leaves a stale flag.
+// Always clearing at entry bounds the leak to "until the next alloc on the
+// same tid" instead of "forever (until tid recycle)". The explicit clear at
+// return is still useful for the common-case fast cleanup.
 static inline void custommem_enter(u64 tid) {
+    custommem_depth.delete(&tid);
     u64 one = 1;
     custommem_depth.update(&tid, &one);
 }
@@ -809,11 +821,19 @@ int malloc_return(struct pt_regs *ctx) {
 #endif
     u64 tid = tid_key();
     struct alloc_pending_t *p = alloc_pending.lookup(&tid);
-    if (!p) return 0;
+    if (!p) {
+        // We saw the return but missed the entry (BCC dropped a uprobe,
+        // or the entry fired before we attached). Clear the depth flag
+        // anyway so any stale entry from a previous customMalloc call
+        // on this tid doesn't keep miscounting.
+        custommem_leave(tid);
+        return 0;
+    }
 
     u64 ptr = PT_REGS_RC(ctx);
     if (ptr == 0) {
         alloc_pending.delete(&tid);
+        custommem_leave(tid);   // OOM path — clear the flag too
         return 0;
     }
 
@@ -917,7 +937,12 @@ int realloc_return(struct pt_regs *ctx) {
 #endif
     u64 tid = tid_key();
     struct alloc_pending_t *p = alloc_pending.lookup(&tid);
-    if (!p) return 0;
+    if (!p) {
+        // Same defensive cleanup as malloc_return — never leave a stale
+        // depth flag if we missed the matched entry.
+        custommem_leave(tid);
+        return 0;
+    }
 
     u64 new_ptr = PT_REGS_RC(ctx);
     u32 pid = get_pid();
@@ -2806,6 +2831,18 @@ def main():
         if track_threads:
             tcm = b["thread_counters"]
             tc = [tcm[tcm.Key(i)].value for i in range(6)]
+        # Tier-mix aggregate computed against the FULL proc_mem map (not the
+        # 32-row capped pids[] list). The frontend used to sum tier counters
+        # over snap.pids[] and divide by snap.alloc.malloc+calloc+realloc —
+        # those denominators come from different populations on a host with
+        # >32 box64 PIDs, producing systematically wrong percentages.
+        try:
+            tier_agg = _aggregate_tier_breakdown(
+                (pm for k, pm in b["proc_mem"].items()
+                 if pid_kind.get(k.value) != "thread"),
+                v[0] + v[2] + v[3])
+        except Exception:
+            tier_agg = _aggregate_tier_breakdown(iter(()), 0)
         return {
             "timestamp_ns": time.monotonic_ns(),
             "alloc": {
@@ -2842,6 +2879,10 @@ def main():
             },
             "pids": _per_pid_snapshot(),
             "pids_threads_filtered": _per_pid_snapshot.last_threads_filtered,
+            # Allocator tier mix aggregated across the FULL proc_mem map.
+            # The frontend reads from here (not from a sum over pids[])
+            # to avoid population skew when there are >32 box64 PIDs.
+            "tier_totals": tier_agg,
             "histograms": {
                 "alloc_sizes": _hist_snapshot("alloc_sizes"),
                 "block_lifetimes": _hist_snapshot("block_lifetimes"),

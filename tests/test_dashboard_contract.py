@@ -38,7 +38,7 @@ JS_DIR = REPO_ROOT / "web" / "js"
 TOP_LEVEL_KEYS = {
     "timestamp_ns", "alloc", "jit", "mmap", "process",
     "protection", "threads", "pids", "histograms",
-    "top_blocks", "top_churned",
+    "top_blocks", "top_churned", "tier_totals",
 }
 
 # nested counter buckets — every one of these is read directly by the JS
@@ -67,6 +67,14 @@ PID_ROW_REQUIRED = {"pid", "label", "jit_bytes", "jit_count",
                     "tier64_count", "tier128_count",
                     "aligned_count", "aligned_bytes",
                     "stray_free_count", "slab_grow_count"}
+
+# JS gauges.js reads snap.tier_totals.{tier64_pct, tier128_pct, list_pct,
+# aligned_count, stray_free, slab_grow}. The backend aggregates across the
+# full proc_mem map (not the truncated pids[] list) so percentages don't skew.
+TIER_TOTALS_REQUIRED = {"tier64", "tier128", "list",
+                        "tier64_pct", "tier128_pct", "list_pct",
+                        "aligned_count", "aligned_bytes",
+                        "stray_free", "slab_grow"}
 
 # JS gauges.js::renderTopBlocks
 TOP_BLOCK_ROW_REQUIRED = {"x64_addr", "alloc_addr", "size", "pid"}
@@ -120,6 +128,14 @@ def _assert_dashboard_snapshot(snap):
         assert not missing, f"pids[{i}] missing keys: {sorted(missing)}"
         assert isinstance(row["pid"], int), f"pids[{i}].pid must be int"
         assert isinstance(row["label"], str), f"pids[{i}].label must be str"
+
+    # tier_totals: aggregated across the FULL proc_mem map. The frontend
+    # reads percentages from here directly; without it the dashboard's
+    # tier-mix panel can't render correctly when there are >32 PIDs.
+    tier_totals = snap["tier_totals"]
+    assert isinstance(tier_totals, dict), "tier_totals must be a dict"
+    missing = TIER_TOTALS_REQUIRED - set(tier_totals)
+    assert not missing, f"tier_totals missing keys: {sorted(missing)}"
 
     # histograms: dict keyed by HISTOGRAM_KEYS, values are dicts of bucket->count
     histograms = snap["histograms"]
@@ -183,6 +199,10 @@ def _good_snapshot():
                   "tier64_count": 0, "tier128_count": 0,
                   "aligned_count": 0, "aligned_bytes": 0,
                   "stray_free_count": 0, "slab_grow_count": 0}],
+        "tier_totals": {"tier64": 0, "tier128": 0, "list": 0,
+                        "tier64_pct": 0.0, "tier128_pct": 0.0, "list_pct": 0.0,
+                        "aligned_count": 0, "aligned_bytes": 0,
+                        "stray_free": 0, "slab_grow": 0},
         "histograms": {"alloc_sizes": {}, "block_lifetimes": {}},
         "top_blocks": [{"x64_addr": 0x401000, "alloc_addr": 0x7f0000000,
                         "size": 4096, "pid": 4242}],
