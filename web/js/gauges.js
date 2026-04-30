@@ -186,13 +186,19 @@ var KGauges = {
      * refresh). */
     var tt = snap.tier_totals;
     if (tt) {
-      var fmtPct = function(p) { return p.toFixed(1) + '%'; };
+      /* Show real counts AND percentage so the user can spot a 1k-vs-100k
+       * difference that would look identical at "100% slab 64B". The KPI
+       * cell is one line, so we render "{count} ({pct}%)". fmtNum
+       * abbreviates >1k → "1.5k", >1M → "1.5M" so it stays narrow. */
+      var fmtCountPct = function(n, p) {
+        return KGauges.fmtNum(n) + ' (' + p.toFixed(1) + '%)';
+      };
       var t64 = document.getElementById('s-tier64');
       var t128 = document.getElementById('s-tier128');
       var tList = document.getElementById('s-tier-list');
-      if (t64)   t64.textContent   = fmtPct(tt.tier64_pct  || 0);
-      if (t128)  t128.textContent  = fmtPct(tt.tier128_pct || 0);
-      if (tList) tList.textContent = fmtPct(tt.list_pct    || 0);
+      if (t64)   t64.textContent   = fmtCountPct(tt.tier64  || 0, tt.tier64_pct  || 0);
+      if (t128)  t128.textContent  = fmtCountPct(tt.tier128 || 0, tt.tier128_pct || 0);
+      if (tList) tList.textContent = fmtCountPct(tt.list    || 0, tt.list_pct    || 0);
       var ae = document.getElementById('s-aligned-count');
       var se = document.getElementById('s-stray-free');
       var ge = document.getElementById('s-slab-grow');
