@@ -96,7 +96,7 @@
 
   <section class="panel" id="p-jit-pressure">
     <h2>JIT Under Pressure
-      <span class="hint">eviction / codegen aborts / 32-bit space</span></h2>
+      <span class="hint">eviction / abort / 32-bit / purge ratio — eviction-policy signals</span></h2>
     <div class="kpis">
       <div class="kpi" title="PurgeDynarecMap — JIT cache evictions. Only fires from AllocDynarecMap when no existing chunk has space; analog of Allocator Extras' slab grow">
         <div class="kpi-label">JIT evict</div>
@@ -107,7 +107,16 @@
       <div class="kpi" title="box32_dynarec_mmap — 32-bit address-space backing pulled (used by ALL slab tiers + JIT mmaplist when running 32-bit guests). 0 on 64-bit-only guests is normal.">
         <div class="kpi-label">box32 grow</div>
         <div class="kpi-val" id="s-box32-grow">0</div></div>
+      <div class="kpi" title="Purge ratio = PurgeDynarecMap / AllocDynarecMap. The fraction of JIT allocations that triggered a cache eviction. High values (&gt;5–10%) indicate the cache is thrashing — direct signal for tuning dynarec_purge_age or growing the cache.">
+        <div class="kpi-label">purge ratio</div>
+        <div class="kpi-val" id="s-purge-ratio">0%</div></div>
     </div>
+  </section>
+
+  <section class="panel" id="p-block-ages">
+    <h2>Live JIT Block Age
+      <span class="hint">age distribution of currently-resident blocks — informs LRU threshold</span></h2>
+    <div class="hist" id="hist-block-ages"></div>
   </section>
 
   <section class="panel" id="p-range-invalidate">

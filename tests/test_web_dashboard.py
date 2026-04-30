@@ -76,7 +76,8 @@ def _fake_snapshot():
         "jit_pressure": {"jit_purge": 0, "jit_cancel": 0, "box32_grow": 0,
                          "range_inval": 0, "range_free": 0,
                          "dbswap_invalid": 0},
-        "histograms": {"alloc_sizes": {}, "block_lifetimes": {}},
+        "histograms": {"alloc_sizes": {}, "block_lifetimes": {},
+                       "block_ages": {}},
         "top_blocks": [], "top_churned": [],
     }
 

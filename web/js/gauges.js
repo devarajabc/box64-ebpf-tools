@@ -226,6 +226,27 @@ var KGauges = {
       if (ri)  ri.textContent  = this.fmtNum(jp.range_inval    || 0);
       if (rf)  rf.textContent  = this.fmtNum(jp.range_free     || 0);
       if (dse) dse.textContent = this.fmtNum(jp.dbswap_invalid || 0);
+      /* Purge ratio = purge / jit_alloc * 100. Computed in JS from
+       * existing fields (no backend change). Renders "—" when there
+       * are no allocations yet, so a fresh attach doesn't show "0%"
+       * (which could be confused with a healthy steady-state). */
+      var pr = document.getElementById('s-purge-ratio');
+      if (pr) {
+        var allocs = (snap.jit && snap.jit.alloc_count) || 0;
+        if (allocs > 0) {
+          pr.textContent = ((jp.jit_purge || 0) / allocs * 100).toFixed(2) + '%';
+        } else {
+          pr.textContent = '—';
+        }
+      }
+    }
+
+    /* Live JIT Block Age histogram. Backend computes age = now - alloc_ns
+     * and bucketizes via floor(log2). Reuse the existing renderHist +
+     * _fmtNsRange so labels display "1ms-2ms", "32ms-63ms", etc. */
+    if (snap.histograms && snap.histograms.block_ages) {
+      this.renderHist('hist-block-ages',
+        snap.histograms.block_ages, this._fmtNsRange);
     }
 
     /* Cache-policy panels */

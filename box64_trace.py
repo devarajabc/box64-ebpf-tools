@@ -2067,6 +2067,35 @@ def _aggregate_tier_breakdown(pm_iter, total_alloc):
     }
 
 
+def _compute_block_age_histogram(jit_blocks_iter, now_ns):
+    """Bucketize live JIT block ages into log2 nanosecond buckets.
+
+    Each row from `jit_blocks_iter` exposes `alloc_ns` (the box64-tracer
+    timestamp captured at AllocDynarecMap return). Age = max(0, now_ns -
+    alloc_ns); bucket = floor(log2(age)) for age >= 1, else 0.
+
+    Returns the same shape as `_hist_snapshot`: a list of
+    {"bucket": int, "count": int} sorted by bucket ascending. The
+    dashboard reuses the existing renderHist + _fmtNsRange JS path —
+    no frontend histogram changes needed.
+
+    Why this matters for eviction policy: PurgeDynarecMap (custommem.c:
+    1622) is age-thresholded LRU. Tuning the threshold needs to know
+    the age distribution of currently-resident blocks — the working
+    set vs. cold tail. We already capture alloc_ns per block so this
+    is a pure user-space derivation; no new BPF probe.
+    """
+    counts = {}
+    for blk in jit_blocks_iter:
+        age = now_ns - blk.alloc_ns
+        if age <= 0:
+            bucket = 0
+        else:
+            bucket = age.bit_length() - 1   # floor(log2)
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return [{"bucket": b, "count": c} for b, c in sorted(counts.items())]
+
+
 def _aggregate_dynablock_extras(pm_iter):
     """Aggregate per-PID dynablock-extras counters across the proc_mem map.
 
@@ -3079,6 +3108,16 @@ def main():
                 if pid_kind.get(k.value) != "thread")
         except Exception:
             dyn_agg = _aggregate_dynablock_extras(iter(()))
+        # Live JIT block age histogram. Computed in user space from the
+        # existing jit_blocks BPF map (alloc_ns per entry) — no new probe.
+        # Informs eviction-policy tuning: shows the age distribution of
+        # currently-resident blocks (working set vs. cold tail).
+        try:
+            now_ns = time.monotonic_ns()
+            block_age_hist = _compute_block_age_histogram(
+                (v for _, v in b["jit_blocks"].items()), now_ns)
+        except Exception:
+            block_age_hist = []
         return {
             "timestamp_ns": time.monotonic_ns(),
             "alloc": {
@@ -3125,6 +3164,11 @@ def main():
             "histograms": {
                 "alloc_sizes": _hist_snapshot("alloc_sizes"),
                 "block_lifetimes": _hist_snapshot("block_lifetimes"),
+                # Age distribution of LIVE blocks (the cache's current
+                # contents), as opposed to block_lifetimes which records
+                # the lifetime of blocks at FREE time. Eviction-policy
+                # designers want both views.
+                "block_ages": block_age_hist,
             },
             "top_blocks": _top_blocks_snapshot(20),
             # churned_x64_addrs is built by handle_churn_event in main().

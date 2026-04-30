@@ -94,7 +94,7 @@ TOP_BLOCK_ROW_REQUIRED = {"x64_addr", "alloc_addr", "size", "pid"}
 # JS gauges.js::renderChurnTable
 TOP_CHURN_ROW_REQUIRED = {"x64_addr", "count"}
 
-HISTOGRAM_KEYS = {"alloc_sizes", "block_lifetimes"}
+HISTOGRAM_KEYS = {"alloc_sizes", "block_lifetimes", "block_ages"}
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +230,8 @@ def _good_snapshot():
         "jit_pressure": {"jit_purge": 0, "jit_cancel": 0, "box32_grow": 0,
                          "range_inval": 0, "range_free": 0,
                          "dbswap_invalid": 0},
-        "histograms": {"alloc_sizes": {}, "block_lifetimes": {}},
+        "histograms": {"alloc_sizes": {}, "block_lifetimes": {},
+                       "block_ages": {}},
         "top_blocks": [{"x64_addr": 0x401000, "alloc_addr": 0x7f0000000,
                         "size": 4096, "pid": 4242}],
         "top_churned": [{"x64_addr": 0x401000, "count": 3}],

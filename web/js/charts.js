@@ -30,9 +30,12 @@ var KCharts = {
     this.charts.alloc = new Chart(document.getElementById('c-alloc'), {
       type: 'line', options: commonOpts,
       data: { labels: [], datasets: [
-        this._ds('malloc/s', '#5b9cf2'),
-        this._ds('free/s',   '#f29c5b'),
-        this._ds('jit alloc/s', '#7ed957'),
+        this._ds('malloc/s',     '#5b9cf2'),
+        this._ds('free/s',       '#f29c5b'),
+        this._ds('calloc/s',     '#5bd9e0'),
+        this._ds('realloc/s',    '#e85bd9'),
+        this._ds('jit alloc/s',  '#7ed957'),
+        this._ds('jit free/s',   '#d97e5e'),
       ]}
     });
 
@@ -87,7 +90,10 @@ var KCharts = {
     this._push(this.charts.alloc, [
       KState.rate(snap, prev, 'alloc.malloc'),
       KState.rate(snap, prev, 'alloc.free'),
+      KState.rate(snap, prev, 'alloc.calloc'),
+      KState.rate(snap, prev, 'alloc.realloc'),
       KState.rate(snap, prev, 'jit.alloc_count'),
+      KState.rate(snap, prev, 'jit.free_count'),
     ]);
 
     var jitMB = (snap.jit && snap.jit.outstanding_bytes) ?
