@@ -136,12 +136,14 @@
   </section>
 
   <section class="panel" id="p-jit">
-    <h2>JIT Blocks</h2>
-    <canvas id="c-jit" height="180"></canvas>
+    <h2>JIT Blocks
+      <span class="hint">live blocks per process — top consumers</span></h2>
+    <canvas id="c-jit" height="120"></canvas>
+    <div id="jit-pid-blocks" class="hist"></div>
     <div class="panel-stats">
-      <span>alloc: <b id="s-jit-alloc">0</b></span>
-      <span>free: <b id="s-jit-free">0</b></span>
-      <span>outstanding: <b id="s-jit-out">0</b></span>
+      <span title="Currently-resident JIT blocks (alloc - free) across all PIDs">outstanding: <b id="s-jit-out">0</b> blocks</span>
+      <span title="Cumulative AllocDynarecMap calls">alloc total: <b id="s-jit-alloc">0</b></span>
+      <span title="Cumulative FreeDynarecMap calls">free total: <b id="s-jit-free">0</b></span>
     </div>
   </section>
 
