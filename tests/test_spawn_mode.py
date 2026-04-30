@@ -227,3 +227,58 @@ class TestValidateSpawnCommand:
         assert out.read_text().splitlines() == [
             "alpha", "beta gamma", "--flag=x",
         ]
+
+
+# ---------------------------------------------------------------------------
+# _extract_guest_program: derive what the dashboard should display as the
+# program being traced, from the spawn-mode COMMAND list.
+# ---------------------------------------------------------------------------
+
+class TestExtractGuestProgram:
+    def test_attach_mode_returns_none(self):
+        # No command at all means we're in attach mode — there's no
+        # single program to point at.
+        assert box64_trace._extract_guest_program([]) is None
+
+    def test_box64_alone_returns_none(self):
+        # Just the runtime with no program is degenerate (would error
+        # at exec anyway), but make sure we don't index past the end.
+        assert box64_trace._extract_guest_program(["box64"]) is None
+
+    def test_explicit_box64_program(self):
+        # The most common spawn invocation: `box64 X.x86_64`.
+        assert box64_trace._extract_guest_program(
+            ["box64", "MyGame.x86_64"]) == "MyGame.x86_64"
+
+    def test_box64_with_program_path(self):
+        # The program path may be absolute or relative — we still want
+        # just the basename for the dashboard label.
+        assert box64_trace._extract_guest_program(
+            ["box64", "/opt/games/MyGame.x86_64"]) == "MyGame.x86_64"
+        assert box64_trace._extract_guest_program(
+            ["box64", "./MyGame.x86_64"]) == "MyGame.x86_64"
+
+    def test_box64_program_with_args(self):
+        # Trailing args belong to the guest program, not the label.
+        assert box64_trace._extract_guest_program(
+            ["box64", "MyGame.x86_64", "--fullscreen", "--lang", "ja"]
+        ) == "MyGame.x86_64"
+
+    def test_binfmt_misc_form(self):
+        # When binfmt_misc is registered, the user runs the .x86_64
+        # directly and the kernel routes it through box64. The first
+        # arg is the guest itself.
+        assert box64_trace._extract_guest_program(
+            ["./MyGame.x86_64"]) == "MyGame.x86_64"
+
+    def test_bare_name_form(self):
+        # _validate_spawn_command rewrites bare names to ./name; both
+        # shapes should produce the same dashboard label.
+        assert box64_trace._extract_guest_program(
+            ["MyGame.x86_64"]) == "MyGame.x86_64"
+
+    def test_absolute_box64_path_still_recognised(self):
+        # If someone scripts `/usr/local/bin/box64 X.x86_64`, the
+        # basename check still strips the runtime correctly.
+        assert box64_trace._extract_guest_program(
+            ["/usr/local/bin/box64", "MyGame.x86_64"]) == "MyGame.x86_64"

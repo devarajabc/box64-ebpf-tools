@@ -47,10 +47,21 @@ class TestRewriteFunction:
 class TestRewriteSteamBPF:
     """Test rewrite against real box64_trace.py BPF_PROGRAM."""
 
-    def test_rewrites_exactly_4_calls(self):
+    # Six call sites in BPF_PROGRAM:
+    #   1. alloc_sizes        ← jit_alloc_return (JIT block size)
+    #   2. block_lifetimes    ← jit_free_return (lifetime bucket)
+    #   3. death_isizes       ← jit_free_return (TRACK_BLOCK_DETAIL)
+    #   4. death_native_sizes ← jit_free_return (TRACK_BLOCK_DETAIL)
+    #   5. alloc_sizes        ← malloc_return  (customMalloc/Calloc size)
+    #   6. alloc_sizes        ← realloc_return (customRealloc new size)
+    EXPECTED_CALLS = 6
+
+    def test_rewrites_exactly_expected_calls(self):
         original = box64_trace.BPF_PROGRAM
         count = len(re.findall(r'\w+\.atomic_increment\(\w+\)', original))
-        assert count == 4, f"Expected 4 atomic_increment calls, found {count}"
+        assert count == self.EXPECTED_CALLS, (
+            f"Expected {self.EXPECTED_CALLS} atomic_increment calls, "
+            f"found {count} — if you added one, update EXPECTED_CALLS.")
 
     def test_no_atomic_increment_after_rewrite(self):
         rewritten = box64_trace._rewrite_atomic_increment(
@@ -63,7 +74,7 @@ class TestRewriteSteamBPF:
         rewritten = box64_trace._rewrite_atomic_increment(
             box64_trace.BPF_PROGRAM
         )
-        assert rewritten.count("lookup_or_init") == 4
+        assert rewritten.count("lookup_or_init") == self.EXPECTED_CALLS
 
     def test_rewrite_inserts_sync_fetch_and_add(self):
         rewritten = box64_trace._rewrite_atomic_increment(
@@ -71,7 +82,7 @@ class TestRewriteSteamBPF:
         )
         orig_count = box64_trace.BPF_PROGRAM.count("__sync_fetch_and_add")
         new_count = rewritten.count("__sync_fetch_and_add")
-        assert new_count == orig_count + 4
+        assert new_count == orig_count + self.EXPECTED_CALLS
 
     def test_non_atomic_increment_lines_unchanged(self):
         original = box64_trace.BPF_PROGRAM

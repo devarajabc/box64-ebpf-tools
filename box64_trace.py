@@ -348,6 +348,12 @@ struct churn_event_t {
     u32 pid;
 };
 BPF_PERF_OUTPUT(churn_events);
+// `alloc_sizes` is fed by BOTH JIT block allocations (AllocDynarecMap)
+// AND custom-allocator allocations (customMalloc/Calloc/Realloc).
+// Without the customMalloc feed the chart never shows the 64B/128B slab
+// tier — i.e. the bulk of small allocations are invisible. The two
+// subsystems share a single histogram so the dashboard label
+// ("Allocation Size Distribution") matches its content.
 BPF_HISTOGRAM(alloc_sizes, int, 64);
 BPF_HISTOGRAM(block_lifetimes, int, 64);
 
@@ -797,6 +803,12 @@ int malloc_return(struct pt_regs *ctx) {
     update_thread_alloc(p->size);
 #endif
 
+    // Feed the unified Allocation Size Distribution. Without this the
+    // 64B/128B slab tier is invisible — the chart only ever showed JIT
+    // page allocations.
+    int mb = log2_u64(p->size);
+    alloc_sizes.atomic_increment(mb);
+
     alloc_pending.delete(&tid);
     return 0;
 }
@@ -889,6 +901,8 @@ int realloc_return(struct pt_regs *ctx) {
 #ifdef TRACK_THREADS
         update_thread_alloc(p->size);
 #endif
+        int rb = log2_u64(p->size);
+        alloc_sizes.atomic_increment(rb);
     }
 
     if (pm) __sync_fetch_and_add(&pm->realloc_count, 1);
@@ -1684,6 +1698,30 @@ def _validate_spawn_command(cmd):
             (f"'{name}' not found on $PATH",
              "check the spelling, install it, or use an absolute / "
              "relative path with `./` or `/`."))
+
+
+def _extract_guest_program(command):
+    """Identify the guest x86_64 program in a spawn-mode COMMAND list.
+
+    Returns the basename of what box64 is emulating, or None if we can't
+    tell (attach mode with no command, or `box64` with no program after it).
+
+    Cases:
+      []                            → None         (attach mode)
+      ['box64']                     → None         (no program after the runtime)
+      ['box64', 'X.x86_64']         → 'X.x86_64'   (explicit)
+      ['box64', '/p/X.x86_64', 'a'] → 'X.x86_64'   (with program args)
+      ['./X.x86_64']                → 'X.x86_64'   (binfmt_misc)
+      ['X.x86_64']                  → 'X.x86_64'   (auto-./ prepend)
+    """
+    if not command:
+        return None
+    head = os.path.basename(command[0])
+    if head == "box64":
+        if len(command) < 2:
+            return None
+        return os.path.basename(command[1])
+    return head
 
 
 def _wait_for_user_signal(flag, poll_interval=0.5):
@@ -2578,11 +2616,17 @@ def main():
         }
 
     def web_stats_meta():
+        # `guest` is what we display in the dashboard header — prefer the
+        # actual x86_64 program name when we can derive it (spawn mode);
+        # in attach mode we don't know the program(s), fall back to the
+        # box64 binary basename.
+        program = _extract_guest_program(args.command)
         return {
             "binary": binary,
             "filter_pid": args.pid if args.pid else 0,
             "interval": args.interval,
-            "guest": os.path.basename(binary),
+            "program": program,
+            "guest": program or os.path.basename(binary),
             "track": {
                 "mem": not args.no_mem, "dynarec": not args.no_dynarec,
                 "mmap": not args.no_mmap, "threads": track_threads,
@@ -2709,12 +2753,17 @@ def main():
             print(f"    unprotectDB:    {vals[24]:>10} calls, {fmt_size(vals[27]):>10} cumulative bytes")
             print(f"    setProtection:  {vals[25]:>10} calls, {fmt_size(vals[28]):>10} cumulative bytes")
 
-        if not args.no_dynarec:
-            # Allocation size histogram
+        # Allocation size histogram. Spans both subsystems (JIT block
+        # allocations + customMalloc/Calloc/Realloc), so it shows up
+        # whenever EITHER tracker is active. Without the custom-allocator
+        # feed the < 256B range was always empty (JIT blocks are
+        # page-aligned).
+        if not args.no_dynarec or not args.no_mem:
             print(f"\n  Allocation Size Distribution:")
             print(format_log2_hist(b["alloc_sizes"], val_type="bytes"))
 
-            # Block lifetime histogram
+        if not args.no_dynarec:
+            # Block lifetime histogram (JIT-specific)
             print(f"\n  Block Lifetime Distribution:")
             print(format_log2_hist(b["block_lifetimes"], val_type="ns"))
 
