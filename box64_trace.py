@@ -237,9 +237,30 @@ struct proc_mem_t {
     u64 box_munmap_count;
     u64 context_created;
     u64 context_freed;
+    // Custom-allocator tier breakdown (custommem.c 3-tier slab structure):
+    //   tier64_count   ← map64_customMalloc  (size <= 64,  64B slot map)
+    //   tier128_count  ← map128_customMalloc (size <= 128, 128B slot map)
+    //   tier LIST count is derived: malloc_count - tier64 - tier128
+    u64 tier64_count;
+    u64 tier128_count;
+    // customMemAligned / customMemAligned32 (posix_memalign / aligned_alloc paths):
+    u64 aligned_count;
+    u64 aligned_bytes;
+    // customFree on a pointer we never observed allocated. Includes pre-existing
+    // allocations from before we attached, so most useful as a relative metric.
+    u64 stray_free_count;
+    // InternalMmap / box_mmap calls observed while inside a customMalloc-family
+    // entry (slab exhausted, n_blocks++, fresh backing region mapped). Detected
+    // via the per-tid custommem_depth flag below.
+    u64 slab_grow_count;
 };
 
 BPF_HASH(proc_mem, u32, struct proc_mem_t, 256);
+
+// Per-tid flag: nonzero whenever we're inside customMalloc / customCalloc /
+// customRealloc / customMemAligned. Lets us detect when InternalMmap/box_mmap
+// is called for a slab grow vs. for an unrelated reason.
+BPF_HASH(custommem_depth, u64, u64, 4096);
 
 static inline struct proc_mem_t *get_or_init_proc_mem(u32 pid) {
     struct proc_mem_t *pm = proc_mem.lookup(&pid);
@@ -756,6 +777,17 @@ int calc_stack_return(struct pt_regs *ctx) {
 // =========================================================================
 #ifdef TRACK_MEM
 
+// Helpers for the slab-grow detector. Mark "we're inside customMalloc-family"
+// at entry; clear at return. InternalMmap / box_mmap entry probes check this
+// flag to attribute a "fresh slab" mmap to the customMalloc path that needed it.
+static inline void custommem_enter(u64 tid) {
+    u64 one = 1;
+    custommem_depth.update(&tid, &one);
+}
+static inline void custommem_leave(u64 tid) {
+    custommem_depth.delete(&tid);
+}
+
 // ---- customMalloc(size_t size) entry ----
 int malloc_entry(struct pt_regs *ctx) {
 #ifdef FILTER_PID
@@ -766,6 +798,7 @@ int malloc_entry(struct pt_regs *ctx) {
     p.type = 0;
     u64 tid = tid_key();
     alloc_pending.update(&tid, &p);
+    custommem_enter(tid);
     return 0;
 }
 
@@ -810,6 +843,7 @@ int malloc_return(struct pt_regs *ctx) {
     alloc_sizes.atomic_increment(mb);
 
     alloc_pending.delete(&tid);
+    custommem_leave(tid);
     return 0;
 }
 
@@ -832,6 +866,14 @@ int free_entry(struct pt_regs *ctx) {
         update_thread_free(blk->size);
 #endif
         malloc_blocks.delete(&ptr);
+    } else {
+        // We never observed this ptr being allocated. Causes:
+        //   - real "block not found in p_blocks" stray free (custommem.c:1123)
+        //   - free of an allocation made before our probes attached
+        //   - hash-table eviction of a long-lived allocation
+        // Most useful as a relative metric (a sudden jump indicates a buggy
+        // free pattern in the guest or a custommem corruption).
+        if (pm) __sync_fetch_and_add(&pm->stray_free_count, 1);
     }
 
     if (pm) __sync_fetch_and_add(&pm->free_count, 1);
@@ -849,6 +891,7 @@ int calloc_entry(struct pt_regs *ctx) {
     p.type = 1;
     u64 tid = tid_key();
     alloc_pending.update(&tid, &p);
+    custommem_enter(tid);
     return 0;
 }
 
@@ -863,6 +906,7 @@ int realloc_entry(struct pt_regs *ctx) {
     p.type = 2;
     u64 tid = tid_key();
     alloc_pending.update(&tid, &p);
+    custommem_enter(tid);
     return 0;
 }
 
@@ -909,6 +953,64 @@ int realloc_return(struct pt_regs *ctx) {
     inc_stat(3, 1);
 
     alloc_pending.delete(&tid);
+    custommem_leave(tid);
+    return 0;
+}
+
+// ---- map64_customMalloc(size, is32bits) — slab tier 1 (size <= 64) ----
+// One of the two fast slab paths. Hit count tells you what fraction of
+// allocations land in the 64B slot map vs. the slower LIST path.
+int tier64_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    u32 pid = get_pid();
+    struct proc_mem_t *pm = get_or_init_proc_mem(pid);
+    if (pm) __sync_fetch_and_add(&pm->tier64_count, 1);
+    return 0;
+}
+
+// ---- map128_customMalloc(size, is32bits) — slab tier 2 (size <= 128) ----
+int tier128_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    u32 pid = get_pid();
+    struct proc_mem_t *pm = get_or_init_proc_mem(pid);
+    if (pm) __sync_fetch_and_add(&pm->tier128_count, 1);
+    return 0;
+}
+
+// ---- customMemAligned(align, size) entry ----
+// posix_memalign / aligned_alloc paths from the guest. Sized via PARM2
+// (PARM1 is the alignment requirement in bytes).
+int aligned_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    u64 size = PT_REGS_PARM2(ctx);
+    u32 pid = get_pid();
+    struct proc_mem_t *pm = get_or_init_proc_mem(pid);
+    if (pm) {
+        __sync_fetch_and_add(&pm->aligned_count, 1);
+        __sync_fetch_and_add(&pm->aligned_bytes, size);
+    }
+    // Also feed the size histogram so aligned allocations are visible there.
+    int ab = log2_u64(size);
+    alloc_sizes.atomic_increment(ab);
+    // Mark the depth flag so a slab grow inside this call is attributed.
+    u64 tid = tid_key();
+    custommem_enter(tid);
+    return 0;
+}
+
+// ---- customMemAligned return ----
+int aligned_return(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    u64 tid = tid_key();
+    custommem_leave(tid);
     return 0;
 }
 
@@ -1186,6 +1288,16 @@ int immap_entry(struct pt_regs *ctx) {
     u64 length = PT_REGS_PARM2(ctx);
     u64 tid = tid_key();
     immap_pending.update(&tid, &length);
+
+    // Slab-grow attribution: if we're inside a customMalloc-family call,
+    // this InternalMmap is for a fresh backing region (n_blocks++ in
+    // custommem.c). Counts as an "allocator under pressure" event.
+    u64 *depth = custommem_depth.lookup(&tid);
+    if (depth && *depth) {
+        u32 pid = get_pid();
+        struct proc_mem_t *pm = get_or_init_proc_mem(pid);
+        if (pm) __sync_fetch_and_add(&pm->slab_grow_count, 1);
+    }
     return 0;
 }
 
@@ -1241,6 +1353,15 @@ int bmmap_entry(struct pt_regs *ctx) {
     u64 length = PT_REGS_PARM2(ctx);
     u64 tid = tid_key();
     bmmap_pending.update(&tid, &length);
+
+    // Same slab-grow attribution as InternalMmap — custommem.c uses box_mmap
+    // for the 32-bit address-space variant of slab backing regions.
+    u64 *depth = custommem_depth.lookup(&tid);
+    if (depth && *depth) {
+        u32 pid = get_pid();
+        struct proc_mem_t *pm = get_or_init_proc_mem(pid);
+        if (pm) __sync_fetch_and_add(&pm->slab_grow_count, 1);
+    }
     return 0;
 }
 
@@ -2071,6 +2192,28 @@ def main():
         b.attach_uprobe(name=binary,    sym="customRealloc", fn_name="realloc_entry")
         b.attach_uretprobe(name=binary, sym="customRealloc", fn_name="realloc_return")
         probe_count += 7
+        # Slab-tier breakdown probes — count which size class each
+        # allocation lands in. These are box64-internal helpers (file-local
+        # in custommem.c but visible in `nm` as text symbols).
+        for sym, fn in (("map64_customMalloc",  "tier64_entry"),
+                        ("map128_customMalloc", "tier128_entry"),
+                        ("customMemAligned",    "aligned_entry")):
+            try:
+                b.attach_uprobe(name=binary, sym=sym, fn_name=fn)
+                probe_count += 1
+            except Exception as e:
+                # Older box64 builds (or stripped binaries) may lack these
+                # exact symbol names. Skip with a hint rather than aborting
+                # the whole tracer — the rest of the allocator metrics
+                # still work without the tier breakdown.
+                print(f"WARNING: could not attach {sym}: {e} — "
+                      f"tier breakdown for this symbol will be unavailable.")
+        try:
+            b.attach_uretprobe(name=binary, sym="customMemAligned",
+                               fn_name="aligned_return")
+            probe_count += 1
+        except Exception:
+            pass
 
     # ---- DynaRec JIT probes ----
     if not args.no_dynarec:
@@ -2586,6 +2729,13 @@ def main():
                     "mmap_bytes": pm.mmap_bytes + pm.box_mmap_bytes,
                     "threads_alive": threads_per_pid.get(pid, 0),
                     "context_created": pm.context_created,
+                    # Allocator tier breakdown (custommem.c 3-tier slab):
+                    "tier64_count":  pm.tier64_count,
+                    "tier128_count": pm.tier128_count,
+                    "aligned_count": pm.aligned_count,
+                    "aligned_bytes": pm.aligned_bytes,
+                    "stray_free_count": pm.stray_free_count,
+                    "slab_grow_count": pm.slab_grow_count,
                 })
         except Exception:
             pass
@@ -2778,6 +2928,43 @@ def main():
             print(f"    malloc:   {vals[0]:>12}   free:   {vals[1]:>12}")
             print(f"    calloc:   {vals[2]:>12}   realloc:{vals[3]:>12}")
             print(f"    bytes allocated: {fmt_size(vals[4]):>12}   bytes freed: {fmt_size(vals[5]):>12}")
+
+            # Tier breakdown across all tracked PIDs. Aggregated from
+            # proc_mem_t.tier{64,128}_count + the aligned/stray/grow
+            # counters that the new probes feed.
+            agg_tier64 = agg_tier128 = 0
+            agg_aligned = agg_aligned_bytes = 0
+            agg_stray = agg_slab_grow = 0
+            try:
+                for _, pm in b["proc_mem"].items():
+                    agg_tier64       += pm.tier64_count
+                    agg_tier128      += pm.tier128_count
+                    agg_aligned      += pm.aligned_count
+                    agg_aligned_bytes += pm.aligned_bytes
+                    agg_stray        += pm.stray_free_count
+                    agg_slab_grow    += pm.slab_grow_count
+            except Exception:
+                pass
+            total_alloc = vals[0] + vals[2] + vals[3]
+            agg_list = max(0, total_alloc - agg_tier64 - agg_tier128)
+            print(f"\n    Tier breakdown (custommem.c 3-tier slab):")
+            if total_alloc > 0:
+                print(f"      slab 64B:  {agg_tier64:>10,}  "
+                      f"({agg_tier64 / total_alloc * 100:>5.1f}%)")
+                print(f"      slab 128B: {agg_tier128:>10,}  "
+                      f"({agg_tier128 / total_alloc * 100:>5.1f}%)")
+                print(f"      LIST:      {agg_list:>10,}  "
+                      f"({agg_list / total_alloc * 100:>5.1f}%)  (size > 128)")
+            else:
+                print(f"      (no allocations recorded)")
+            print(f"    customMemAligned:     {agg_aligned:>10,} calls, "
+                  f"{fmt_size(agg_aligned_bytes):>12} bytes")
+            print(f"    Stray frees:          {agg_stray:>10,}  "
+                  f"(free of ptr we never observed; high values ⇒ buggy "
+                  f"guest free pattern OR pre-attach allocations)")
+            print(f"    Slab-grow events:     {agg_slab_grow:>10,}  "
+                  f"(InternalMmap/box_mmap inside customMalloc — fresh "
+                  f"backing region needed)")
 
         if not args.no_dynarec:
             churn_pct = (vals[21] / vals[7] * 100) if vals[7] > 0 else 0.0
@@ -3187,6 +3374,19 @@ def main():
                     print(f"      bytes alloc: {fmt_size(v.malloc_bytes):>12}  "
                           f"bytes freed: {fmt_size(v.free_bytes):>12}  "
                           f"net: {fmt_size(net_alloc_bytes):>12}")
+                    pid_total = v.malloc_count + v.calloc_count + v.realloc_count
+                    pid_list = max(0, pid_total - v.tier64_count - v.tier128_count)
+                    if pid_total > 0:
+                        print(f"      tier 64B:  {v.tier64_count:>10}  "
+                              f"({v.tier64_count / pid_total * 100:>5.1f}%)    "
+                              f"tier 128B: {v.tier128_count:>10}  "
+                              f"({v.tier128_count / pid_total * 100:>5.1f}%)    "
+                              f"LIST: {pid_list:>10}  "
+                              f"({pid_list / pid_total * 100:>5.1f}%)")
+                    print(f"      aligned: {v.aligned_count:>10} calls, "
+                          f"{fmt_size(v.aligned_bytes):>12}    "
+                          f"stray-free: {v.stray_free_count:>8}    "
+                          f"slab-grow: {v.slab_grow_count:>6}")
 
                 if not args.no_dynarec:
                     net_jit = v.jit_alloc_bytes - v.jit_free_bytes

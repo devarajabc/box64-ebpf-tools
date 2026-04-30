@@ -62,7 +62,11 @@ THREADS_KEYS = {"create_entry", "create_return", "start_entry",
 PID_ROW_REQUIRED = {"pid", "label", "jit_bytes", "jit_count",
                     "jit_freed_count", "jit_invalidations",
                     "malloc_bytes", "mmap_bytes",
-                    "threads_alive", "context_created"}
+                    "threads_alive", "context_created",
+                    # Allocator tier breakdown (custommem.c 3-tier slab):
+                    "tier64_count", "tier128_count",
+                    "aligned_count", "aligned_bytes",
+                    "stray_free_count", "slab_grow_count"}
 
 # JS gauges.js::renderTopBlocks
 TOP_BLOCK_ROW_REQUIRED = {"x64_addr", "alloc_addr", "size", "pid"}
@@ -175,7 +179,10 @@ def _good_snapshot():
                   "jit_bytes": 4096, "jit_count": 1,
                   "jit_freed_count": 0, "jit_invalidations": 0,
                   "malloc_bytes": 32, "mmap_bytes": 0,
-                  "threads_alive": 1, "context_created": 1}],
+                  "threads_alive": 1, "context_created": 1,
+                  "tier64_count": 0, "tier128_count": 0,
+                  "aligned_count": 0, "aligned_bytes": 0,
+                  "stray_free_count": 0, "slab_grow_count": 0}],
         "histograms": {"alloc_sizes": {}, "block_lifetimes": {}},
         "top_blocks": [{"x64_addr": 0x401000, "alloc_addr": 0x7f0000000,
                         "size": 4096, "pid": 4242}],

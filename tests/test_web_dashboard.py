@@ -61,7 +61,10 @@ def _fake_snapshot():
         "pids": [{"pid": 123, "label": "test", "jit_bytes": 512,
                   "jit_count": 5, "jit_freed_count": 2, "jit_invalidations": 1,
                   "malloc_bytes": 4096, "mmap_bytes": 0,
-                  "threads_alive": 1, "context_created": 1}],
+                  "threads_alive": 1, "context_created": 1,
+                  "tier64_count": 3, "tier128_count": 1,
+                  "aligned_count": 0, "aligned_bytes": 0,
+                  "stray_free_count": 0, "slab_grow_count": 0}],
         "histograms": {"alloc_sizes": {}, "block_lifetimes": {}},
         "top_blocks": [], "top_churned": [],
     }

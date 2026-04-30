@@ -62,6 +62,38 @@
     </div>
   </section>
 
+  <section class="panel" id="p-alloc-tiers">
+    <h2>Allocator Tier Mix
+      <span class="hint">custommem.c 3-tier slab — fast paths vs. LIST</span></h2>
+    <div class="kpis">
+      <div class="kpi" title="map64_customMalloc — size ≤ 64B fast slab path (% of all allocations)">
+        <div class="kpi-label">slab 64B</div>
+        <div class="kpi-val" id="s-tier64">0</div></div>
+      <div class="kpi" title="map128_customMalloc — size ≤ 128B fast slab path">
+        <div class="kpi-label">slab 128B</div>
+        <div class="kpi-val" id="s-tier128">0</div></div>
+      <div class="kpi" title="internal_customMalloc LIST path — size > 128B; slower, fragments more">
+        <div class="kpi-label">LIST</div>
+        <div class="kpi-val" id="s-tier-list">0</div></div>
+    </div>
+  </section>
+
+  <section class="panel" id="p-alloc-extras">
+    <h2>Allocator Extras
+      <span class="hint">aligned / stray free / slab pressure</span></h2>
+    <div class="kpis">
+      <div class="kpi" title="customMemAligned — posix_memalign / aligned_alloc paths from the guest">
+        <div class="kpi-label">aligned</div>
+        <div class="kpi-val" id="s-aligned-count">0</div></div>
+      <div class="kpi" title="customFree on a pointer never observed allocated. High counts ⇒ buggy guest free pattern OR pre-attach allocations">
+        <div class="kpi-label">stray free</div>
+        <div class="kpi-val" id="s-stray-free">0</div></div>
+      <div class="kpi" title="InternalMmap / box_mmap inside customMalloc — slab exhausted, fresh backing region needed (allocator under pressure)">
+        <div class="kpi-label">slab grow</div>
+        <div class="kpi-val" id="s-slab-grow">0</div></div>
+    </div>
+  </section>
+
   <section class="panel" id="p-jit">
     <h2>JIT Blocks</h2>
     <canvas id="c-jit" height="180"></canvas>

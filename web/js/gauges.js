@@ -178,6 +178,48 @@ var KGauges = {
       if (mubEl) mubEl.textContent = this.fmtNum(snap.mmap.box_munmap || 0);
     }
 
+    /* Allocator tier breakdown + extras — aggregated across pids[] since
+     * proc_mem_t carries the per-PID counters. The LIST tier is derived
+     * (total customMalloc-family calls minus slab tiers). All KPIs render
+     * as percentages where the denominator is the sum of customMalloc
+     * calls, so an empty-state run shows 0% / 0% / 0% rather than NaN. */
+    if (snap.pids) {
+      var tier64 = 0, tier128 = 0, totalAlloc = 0;
+      var aligned = 0, stray = 0, grow = 0;
+      for (var pi = 0; pi < snap.pids.length; pi++) {
+        var pp = snap.pids[pi];
+        tier64     += pp.tier64_count     || 0;
+        tier128    += pp.tier128_count    || 0;
+        aligned    += pp.aligned_count    || 0;
+        stray      += pp.stray_free_count || 0;
+        grow       += pp.slab_grow_count  || 0;
+        /* total customMalloc-family = malloc + calloc + realloc; rows
+         * carry the call counts (malloc_count / free_count exist; for
+         * tier % we derive total from the snapshot's aggregate alloc
+         * bucket where available). */
+      }
+      if (snap.alloc) {
+        totalAlloc = (snap.alloc.malloc || 0) + (snap.alloc.calloc || 0)
+                   + (snap.alloc.realloc || 0);
+      }
+      var listTier = Math.max(0, totalAlloc - tier64 - tier128);
+      var fmtPct = function(n, t) {
+        return t > 0 ? (n / t * 100).toFixed(1) + '%' : '0.0%';
+      };
+      var t64 = document.getElementById('s-tier64');
+      var t128 = document.getElementById('s-tier128');
+      var tList = document.getElementById('s-tier-list');
+      if (t64)  t64.textContent  = fmtPct(tier64, totalAlloc);
+      if (t128) t128.textContent = fmtPct(tier128, totalAlloc);
+      if (tList) tList.textContent = fmtPct(listTier, totalAlloc);
+      var ae = document.getElementById('s-aligned-count');
+      var se = document.getElementById('s-stray-free');
+      var ge = document.getElementById('s-slab-grow');
+      if (ae) ae.textContent = this.fmtNum(aligned);
+      if (se) se.textContent = this.fmtNum(stray);
+      if (ge) ge.textContent = this.fmtNum(grow);
+    }
+
     /* Cache-policy panels */
     if (snap.histograms) {
       this.renderHist('hist-alloc-sizes',

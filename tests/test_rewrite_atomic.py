@@ -47,14 +47,15 @@ class TestRewriteFunction:
 class TestRewriteSteamBPF:
     """Test rewrite against real box64_trace.py BPF_PROGRAM."""
 
-    # Six call sites in BPF_PROGRAM:
+    # Seven call sites in BPF_PROGRAM:
     #   1. alloc_sizes        ← jit_alloc_return (JIT block size)
     #   2. block_lifetimes    ← jit_free_return (lifetime bucket)
     #   3. death_isizes       ← jit_free_return (TRACK_BLOCK_DETAIL)
     #   4. death_native_sizes ← jit_free_return (TRACK_BLOCK_DETAIL)
     #   5. alloc_sizes        ← malloc_return  (customMalloc/Calloc size)
     #   6. alloc_sizes        ← realloc_return (customRealloc new size)
-    EXPECTED_CALLS = 6
+    #   7. alloc_sizes        ← aligned_entry  (customMemAligned size)
+    EXPECTED_CALLS = 7
 
     def test_rewrites_exactly_expected_calls(self):
         original = box64_trace.BPF_PROGRAM
