@@ -363,14 +363,20 @@ body.light .kh-tooltip {
   overflow-y: auto;
 }
 
-/* Invalidation KPI strip */
+/* KPI strip used by the Invalidations, Allocator Bytes, and mmap panels.
+ * `min-width: 0` lets each kpi shrink past its content's intrinsic width so
+ * long labels/values don't blow out the parent's overflow:hidden box.
+ * `overflow-wrap: anywhere` on labels & values handles the worst case
+ * (no whitespace) without forcing aggressive break-all on every line. */
 .kpis {
   display: flex;
   gap: 12px;
   padding: 6px 0 12px 0;
+  flex-wrap: wrap;
 }
 .kpi {
-  flex: 1;
+  flex: 1 1 110px;
+  min-width: 0;
   text-align: center;
   padding: 8px;
   border: 1px solid rgba(127,127,127,0.15);
@@ -381,12 +387,14 @@ body.light .kh-tooltip {
   color: rgba(127,127,127,0.8);
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  overflow-wrap: anywhere;
 }
 .kpi-val {
   font-size: 20px;
   font-weight: 600;
   font-family: monospace;
   margin-top: 4px;
+  overflow-wrap: anywhere;
 }
 
 /* Section subtitle */
