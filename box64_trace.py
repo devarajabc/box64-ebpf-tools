@@ -267,6 +267,32 @@ struct proc_mem_t {
     // slab grow only fires one of the two probes. If upstream ever unifies
     // the paths this becomes a silent 2× over-count; revisit then.
     u64 slab_grow_count;
+    // ---- Dynablock-extras (Bundle A: JIT under pressure) ----
+    // PurgeDynarecMap calls — JIT cache eviction. Only fires from
+    // AllocDynarecMap when the allocator can't find space, so the rate
+    // is the JIT-side analog of slab_grow_count.
+    u64 jit_purge_count;
+    // CancelBlock64 calls — codegen aborted mid-build. Fires from
+    // CreateEmptyBlock and from FillBlock64 bail-out points.
+    u64 jit_cancel_count;
+    // box32_dynarec_mmap calls — 32-bit address-space backing region
+    // pulled. Used by ALL slab tiers AND the JIT mmaplist when running
+    // 32-bit guests. Single counter for "32-bit space pressure".
+    u64 box32_dynarec_count;
+    // ---- Dynablock-extras (Bundle B: range invalidation) ----
+    // MarkRangeDynablock — bulk-invalidate over a guest address range
+    // (e.g. mprotect / munmap / library unload). Single call invalidates
+    // many blocks; rate matters more than absolute count.
+    u64 range_invalidate_count;
+    // FreeRangeDynablock — bulk-free of blocks in a range. Pairs with
+    // the above; tracks how aggressively the JIT reclaims dead range
+    // regions vs. just marking them invalid.
+    u64 range_free_count;
+    // DBSwapInvalid — recompile path: an invalidated block being rebuilt
+    // (DBGetBlock found an invalid block and triggered translation).
+    // Direct "code retranslated" signal — high values indicate heavy
+    // self-modifying-code workload or repeated mprotect cycles.
+    u64 dbswap_invalid_count;
 };
 
 BPF_HASH(proc_mem, u32, struct proc_mem_t, 256);
@@ -1279,6 +1305,94 @@ int markdynablock_entry(struct pt_regs *ctx) {
 
 #endif /* TRACK_BLOCK_DETAIL */
 
+// ---- Dynablock extras: JIT pressure + range invalidation ----
+// All six probes follow the same trivial pattern (per-PID counter
+// increment), so factored into a single helper to keep the BPF source
+// short. inc_pm_field would be cleaner but BCC's verifier rejects
+// passing a struct field reference through a function — so each probe
+// dispatches to get_or_init_proc_mem and bumps the field directly.
+
+// ---- PurgeDynarecMap (JIT cache eviction) ----
+// Called only from AllocDynarecMap (custommem.c) when no existing
+// mmaplist chunk has space. JIT-side analog of slab_grow_count.
+int purge_dynarec_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    u32 pid = get_pid();
+    struct proc_mem_t *pm = get_or_init_proc_mem(pid);
+    if (pm) __sync_fetch_and_add(&pm->jit_purge_count, 1);
+    return 0;
+}
+
+// ---- CancelBlock64 (codegen aborted mid-build) ----
+// Called from CreateEmptyBlock and from FillBlock64 bail-out paths.
+// Rising count = JIT giving up on specific block patterns.
+int cancel_block_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    u32 pid = get_pid();
+    struct proc_mem_t *pm = get_or_init_proc_mem(pid);
+    if (pm) __sync_fetch_and_add(&pm->jit_cancel_count, 1);
+    return 0;
+}
+
+// ---- box32_dynarec_mmap (32-bit address space pressure) ----
+// Cross-cutting: called by map64/map128_customMalloc, internal_customMalloc,
+// internal_customMemAligned, AND MmaplistAddBlock. Single counter for
+// "32-bit guest pulled a fresh backing region" — only fires for is32bits=1
+// allocations.
+int box32_dynarec_mmap_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    u32 pid = get_pid();
+    struct proc_mem_t *pm = get_or_init_proc_mem(pid);
+    if (pm) __sync_fetch_and_add(&pm->box32_dynarec_count, 1);
+    return 0;
+}
+
+// ---- MarkRangeDynablock (bulk invalidate over guest address range) ----
+// One call ⇒ many blocks marked invalid. Fires when the guest does
+// mprotect, munmap, or unloads a library that contains JIT-translated code.
+int mark_range_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    u32 pid = get_pid();
+    struct proc_mem_t *pm = get_or_init_proc_mem(pid);
+    if (pm) __sync_fetch_and_add(&pm->range_invalidate_count, 1);
+    return 0;
+}
+
+// ---- FreeRangeDynablock (bulk free over a range) ----
+// Pairs with MarkRangeDynablock. Tracks whether the JIT actually
+// reclaims memory from invalidated ranges or just leaves them marked.
+int free_range_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    u32 pid = get_pid();
+    struct proc_mem_t *pm = get_or_init_proc_mem(pid);
+    if (pm) __sync_fetch_and_add(&pm->range_free_count, 1);
+    return 0;
+}
+
+// ---- DBSwapInvalid (recompile path) ----
+// DBGetBlock found a previously-invalidated block at this address and
+// triggered translation. High counts ⇒ heavy self-modifying-code or
+// repeated mprotect cycles.
+int dbswap_invalid_entry(struct pt_regs *ctx) {
+#ifdef FILTER_PID
+    if (get_pid() != FILTER_PID) return 0;
+#endif
+    u32 pid = get_pid();
+    struct proc_mem_t *pm = get_or_init_proc_mem(pid);
+    if (pm) __sync_fetch_and_add(&pm->dbswap_invalid_count, 1);
+    return 0;
+}
+
 #endif /* TRACK_DYNAREC */
 
 
@@ -1953,6 +2067,38 @@ def _aggregate_tier_breakdown(pm_iter, total_alloc):
     }
 
 
+def _aggregate_dynablock_extras(pm_iter):
+    """Aggregate per-PID dynablock-extras counters across the proc_mem map.
+
+    Combines two conceptual bundles into one helper because both pull from
+    the same six fields on each row:
+
+      Bundle A — JIT under pressure (alloc-side):
+        jit_purge       ← PurgeDynarecMap calls
+        jit_cancel      ← CancelBlock64 calls
+        box32_grow      ← box32_dynarec_mmap calls
+
+      Bundle B — Range invalidation:
+        range_inval     ← MarkRangeDynablock calls
+        range_free      ← FreeRangeDynablock calls
+        dbswap_invalid  ← DBSwapInvalid calls
+
+    These are raw event counts, not percentages — there's no meaningful
+    "denominator" to divide by (unlike tier-mix where allocation total is
+    the denominator). Returning a flat dict keeps the JS reader simple.
+    """
+    out = {"jit_purge": 0, "jit_cancel": 0, "box32_grow": 0,
+           "range_inval": 0, "range_free": 0, "dbswap_invalid": 0}
+    for pm in pm_iter:
+        out["jit_purge"]      += pm.jit_purge_count
+        out["jit_cancel"]     += pm.jit_cancel_count
+        out["box32_grow"]     += pm.box32_dynarec_count
+        out["range_inval"]    += pm.range_invalidate_count
+        out["range_free"]     += pm.range_free_count
+        out["dbswap_invalid"] += pm.dbswap_invalid_count
+    return out
+
+
 def _wait_for_user_signal(flag, poll_interval=0.5):
     """Block until `flag[0]` becomes truthy.
 
@@ -2093,6 +2239,22 @@ def main():
         if missing_jit:
             print(f"WARNING: DynaRec symbols missing: {', '.join(missing_jit)}; disabling JIT tracking.")
             args.no_dynarec = True
+
+    # Optional dynablock-extras symbols (Bundle A: JIT under pressure +
+    # Bundle B: range invalidation). Pre-checked here so the attach loop
+    # below stays narrow — any exception there now is a real BPF error,
+    # not a missing-symbol case. Same pattern as the customMalloc-tier
+    # symbol gate established in commit f5a7af7.
+    present_dynablock_syms = set()
+    if not args.no_dynarec:
+        for sym in ("PurgeDynarecMap", "CancelBlock64", "box32_dynarec_mmap",
+                    "MarkRangeDynablock", "FreeRangeDynablock",
+                    "DBSwapInvalid"):
+            if not check_symbols_soft(binary, [sym]):
+                present_dynablock_syms.add(sym)
+            else:
+                print(f"INFO: {sym} not present in {binary} — corresponding "
+                      f"JIT-pressure / range metric will read 0.")
 
     # Protection symbols (only when dynarec is enabled)
     track_prot = False
@@ -2338,6 +2500,20 @@ def main():
         b.attach_uretprobe(name=binary, sym="AllocDynarecMap", fn_name="jit_alloc_return")
         b.attach_uprobe(name=binary,    sym="FreeDynarecMap",  fn_name="jit_free_entry")
         probe_count += 3
+
+        # Dynablock-extras probes — only attach the symbols that exist
+        # on this build (filtered upstream via check_symbols_soft). Any
+        # exception escaping here is a real BPF/perm error worth
+        # surfacing — same narrowing as the customMalloc-tier gate.
+        for sym, fn in (("PurgeDynarecMap",    "purge_dynarec_entry"),
+                        ("CancelBlock64",      "cancel_block_entry"),
+                        ("box32_dynarec_mmap", "box32_dynarec_mmap_entry"),
+                        ("MarkRangeDynablock", "mark_range_entry"),
+                        ("FreeRangeDynablock", "free_range_entry"),
+                        ("DBSwapInvalid",      "dbswap_invalid_entry")):
+            if sym in present_dynablock_syms:
+                b.attach_uprobe(name=binary, sym=sym, fn_name=fn)
+                probe_count += 1
 
     # ---- Protection probes ----
     if track_prot:
@@ -2853,6 +3029,14 @@ def main():
                     "aligned_bytes": pm.aligned_bytes,
                     "stray_free_count": pm.stray_free_count,
                     "slab_grow_count": pm.slab_grow_count,
+                    # Dynablock extras — Bundle A (JIT pressure) +
+                    # Bundle B (range invalidation):
+                    "jit_purge_count":        pm.jit_purge_count,
+                    "jit_cancel_count":       pm.jit_cancel_count,
+                    "box32_dynarec_count":    pm.box32_dynarec_count,
+                    "range_invalidate_count": pm.range_invalidate_count,
+                    "range_free_count":       pm.range_free_count,
+                    "dbswap_invalid_count":   pm.dbswap_invalid_count,
                 })
         except Exception:
             pass
@@ -2885,6 +3069,16 @@ def main():
                 v[0] + v[2] + v[3])
         except Exception:
             tier_agg = _aggregate_tier_breakdown(iter(()), 0)
+        # Dynablock-extras aggregate. Same full-map iteration as tier_agg
+        # so the count is consistent with what the CLI shows. Threads are
+        # filtered because their JIT/dynablock activity folds into the
+        # parent's TGID-keyed proc_mem entry; no information is lost.
+        try:
+            dyn_agg = _aggregate_dynablock_extras(
+                pm for k, pm in b["proc_mem"].items()
+                if pid_kind.get(k.value) != "thread")
+        except Exception:
+            dyn_agg = _aggregate_dynablock_extras(iter(()))
         return {
             "timestamp_ns": time.monotonic_ns(),
             "alloc": {
@@ -2925,6 +3119,9 @@ def main():
             # The frontend reads from here (not from a sum over pids[])
             # to avoid population skew when there are >32 box64 PIDs.
             "tier_totals": tier_agg,
+            # Dynablock-extras aggregate (JIT pressure + range invalidation).
+            # Six raw event counts; no derived percentages.
+            "jit_pressure": dyn_agg,
             "histograms": {
                 "alloc_sizes": _hist_snapshot("alloc_sizes"),
                 "block_lifetimes": _hist_snapshot("block_lifetimes"),
@@ -3100,6 +3297,34 @@ def main():
             print(f"    Bytes allocated:  {fmt_size(vals[8]):>12}")
             print(f"    Bytes freed:      {fmt_size(vals[9]):>12}")
             print(f"    Outstanding:      {fmt_size(vals[22]):>12}")
+
+            # Dynablock-extras: JIT under pressure + range invalidation.
+            # Source: _aggregate_dynablock_extras over proc_mem (full map,
+            # threads excluded — same population the dashboard uses).
+            try:
+                dyn = _aggregate_dynablock_extras(
+                    pm for k, pm in b["proc_mem"].items()
+                    if pid_kind.get(k.value) != "thread")
+            except Exception:
+                dyn = _aggregate_dynablock_extras(iter(()))
+            print(f"\n  JIT Under Pressure:")
+            print(f"    PurgeDynarecMap:  {dyn['jit_purge']:>12,}  "
+                  f"(JIT cache evictions — fired only from "
+                  f"AllocDynarecMap when no chunk has space)")
+            print(f"    CancelBlock64:    {dyn['jit_cancel']:>12,}  "
+                  f"(codegen aborted mid-build — translator bail-outs)")
+            print(f"    box32 grows:      {dyn['box32_grow']:>12,}  "
+                  f"(32-bit address-space backing pulls — only fires "
+                  f"when running 32-bit guests)")
+            print(f"\n  Range Invalidation:")
+            print(f"    MarkRangeDynablock: {dyn['range_inval']:>10,}  "
+                  f"(bulk invalidate — mprotect / library unload)")
+            print(f"    FreeRangeDynablock: {dyn['range_free']:>10,}  "
+                  f"(bulk free — paired with the above)")
+            print(f"    DBSwapInvalid:      {dyn['dbswap_invalid']:>10,}  "
+                  f"(recompile path — invalid block being rebuilt; "
+                  f"high values ⇒ self-modifying code or repeated "
+                  f"mprotect cycles)")
 
         if track_prot:
             print(f"\n  Protection Overhead:")

@@ -38,7 +38,7 @@ JS_DIR = REPO_ROOT / "web" / "js"
 TOP_LEVEL_KEYS = {
     "timestamp_ns", "alloc", "jit", "mmap", "process",
     "protection", "threads", "pids", "histograms",
-    "top_blocks", "top_churned", "tier_totals",
+    "top_blocks", "top_churned", "tier_totals", "jit_pressure",
 }
 
 # nested counter buckets — every one of these is read directly by the JS
@@ -66,7 +66,13 @@ PID_ROW_REQUIRED = {"pid", "label", "jit_bytes", "jit_count",
                     # Allocator tier breakdown (custommem.c 3-tier slab):
                     "tier64_count", "tier128_count",
                     "aligned_count", "aligned_bytes",
-                    "stray_free_count", "slab_grow_count"}
+                    "stray_free_count", "slab_grow_count",
+                    # Dynablock-extras (Bundle A: JIT pressure +
+                    # Bundle B: range invalidation):
+                    "jit_purge_count", "jit_cancel_count",
+                    "box32_dynarec_count",
+                    "range_invalidate_count", "range_free_count",
+                    "dbswap_invalid_count"}
 
 # JS gauges.js reads snap.tier_totals.{tier64_pct, tier128_pct, list_pct,
 # aligned_count, stray_free, slab_grow}. The backend aggregates across the
@@ -75,6 +81,12 @@ TIER_TOTALS_REQUIRED = {"tier64", "tier128", "list",
                         "tier64_pct", "tier128_pct", "list_pct",
                         "aligned_count", "aligned_bytes",
                         "stray_free", "slab_grow"}
+
+# JS gauges.js reads snap.jit_pressure.{jit_purge, jit_cancel, box32_grow,
+# range_inval, range_free, dbswap_invalid}. All raw counts (no derived
+# percentages) — the panel reports event totals.
+JIT_PRESSURE_REQUIRED = {"jit_purge", "jit_cancel", "box32_grow",
+                         "range_inval", "range_free", "dbswap_invalid"}
 
 # JS gauges.js::renderTopBlocks
 TOP_BLOCK_ROW_REQUIRED = {"x64_addr", "alloc_addr", "size", "pid"}
@@ -137,6 +149,14 @@ def _assert_dashboard_snapshot(snap):
     missing = TIER_TOTALS_REQUIRED - set(tier_totals)
     assert not missing, f"tier_totals missing keys: {sorted(missing)}"
 
+    # jit_pressure: aggregated dynablock-side event counters
+    # (PurgeDynarecMap / CancelBlock64 / box32_dynarec_mmap +
+    # MarkRangeDynablock / FreeRangeDynablock / DBSwapInvalid).
+    jit_pressure = snap["jit_pressure"]
+    assert isinstance(jit_pressure, dict), "jit_pressure must be a dict"
+    missing = JIT_PRESSURE_REQUIRED - set(jit_pressure)
+    assert not missing, f"jit_pressure missing keys: {sorted(missing)}"
+
     # histograms: dict keyed by HISTOGRAM_KEYS, values are dicts of bucket->count
     histograms = snap["histograms"]
     assert isinstance(histograms, dict), "histograms must be a dict"
@@ -198,11 +218,18 @@ def _good_snapshot():
                   "threads_alive": 1, "context_created": 1,
                   "tier64_count": 0, "tier128_count": 0,
                   "aligned_count": 0, "aligned_bytes": 0,
-                  "stray_free_count": 0, "slab_grow_count": 0}],
+                  "stray_free_count": 0, "slab_grow_count": 0,
+                  "jit_purge_count": 0, "jit_cancel_count": 0,
+                  "box32_dynarec_count": 0,
+                  "range_invalidate_count": 0, "range_free_count": 0,
+                  "dbswap_invalid_count": 0}],
         "tier_totals": {"tier64": 0, "tier128": 0, "list": 0,
                         "tier64_pct": 0.0, "tier128_pct": 0.0, "list_pct": 0.0,
                         "aligned_count": 0, "aligned_bytes": 0,
                         "stray_free": 0, "slab_grow": 0},
+        "jit_pressure": {"jit_purge": 0, "jit_cancel": 0, "box32_grow": 0,
+                         "range_inval": 0, "range_free": 0,
+                         "dbswap_invalid": 0},
         "histograms": {"alloc_sizes": {}, "block_lifetimes": {}},
         "top_blocks": [{"x64_addr": 0x401000, "alloc_addr": 0x7f0000000,
                         "size": 4096, "pid": 4242}],

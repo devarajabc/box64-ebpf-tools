@@ -207,6 +207,27 @@ var KGauges = {
       if (ge) ge.textContent = this.fmtNum(tt.slab_grow     || 0);
     }
 
+    /* JIT-side dynablock-extras (Bundle A: pressure + Bundle B: range
+     * invalidation). Read from snap.jit_pressure — aggregated by the
+     * backend across the FULL proc_mem map, threads excluded. Falls
+     * back to "0" if the snapshot is from an older backend during a
+     * rolling refresh (no fields ⇒ all zeros, not NaN). */
+    var jp = snap.jit_pressure;
+    if (jp) {
+      var pe = document.getElementById('s-jit-purge');
+      var ce = document.getElementById('s-jit-cancel');
+      var bge = document.getElementById('s-box32-grow');
+      if (pe)  pe.textContent  = this.fmtNum(jp.jit_purge      || 0);
+      if (ce)  ce.textContent  = this.fmtNum(jp.jit_cancel     || 0);
+      if (bge) bge.textContent = this.fmtNum(jp.box32_grow     || 0);
+      var ri = document.getElementById('s-range-inval');
+      var rf = document.getElementById('s-range-free');
+      var dse = document.getElementById('s-dbswap');
+      if (ri)  ri.textContent  = this.fmtNum(jp.range_inval    || 0);
+      if (rf)  rf.textContent  = this.fmtNum(jp.range_free     || 0);
+      if (dse) dse.textContent = this.fmtNum(jp.dbswap_invalid || 0);
+    }
+
     /* Cache-policy panels */
     if (snap.histograms) {
       this.renderHist('hist-alloc-sizes',

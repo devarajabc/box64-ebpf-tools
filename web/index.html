@@ -94,6 +94,38 @@
     </div>
   </section>
 
+  <section class="panel" id="p-jit-pressure">
+    <h2>JIT Under Pressure
+      <span class="hint">eviction / codegen aborts / 32-bit space</span></h2>
+    <div class="kpis">
+      <div class="kpi" title="PurgeDynarecMap — JIT cache evictions. Only fires from AllocDynarecMap when no existing chunk has space; analog of Allocator Extras' slab grow">
+        <div class="kpi-label">JIT evict</div>
+        <div class="kpi-val" id="s-jit-purge">0</div></div>
+      <div class="kpi" title="CancelBlock64 — codegen aborted mid-build. Fires from CreateEmptyBlock and FillBlock64 bail-out points; rising values ⇒ JIT giving up on specific block patterns">
+        <div class="kpi-label">codegen abort</div>
+        <div class="kpi-val" id="s-jit-cancel">0</div></div>
+      <div class="kpi" title="box32_dynarec_mmap — 32-bit address-space backing pulled (used by ALL slab tiers + JIT mmaplist when running 32-bit guests). 0 on 64-bit-only guests is normal.">
+        <div class="kpi-label">box32 grow</div>
+        <div class="kpi-val" id="s-box32-grow">0</div></div>
+    </div>
+  </section>
+
+  <section class="panel" id="p-range-invalidate">
+    <h2>Range Invalidation
+      <span class="hint">bulk invalidate / free / recompile</span></h2>
+    <div class="kpis">
+      <div class="kpi" title="MarkRangeDynablock — bulk invalidate over a guest address range. One call invalidates many blocks. Fires when the guest mprotects, munmaps, or unloads a library that contains JIT-translated code">
+        <div class="kpi-label">mark range</div>
+        <div class="kpi-val" id="s-range-inval">0</div></div>
+      <div class="kpi" title="FreeRangeDynablock — bulk free over a range. Pairs with mark range; tracks whether the JIT actually reclaims memory or just marks it invalid">
+        <div class="kpi-label">free range</div>
+        <div class="kpi-val" id="s-range-free">0</div></div>
+      <div class="kpi" title="DBSwapInvalid — invalidated block being rebuilt (recompile path). High values ⇒ heavy self-modifying code or repeated mprotect cycles in the guest">
+        <div class="kpi-label">recompile</div>
+        <div class="kpi-val" id="s-dbswap">0</div></div>
+    </div>
+  </section>
+
   <section class="panel" id="p-jit">
     <h2>JIT Blocks</h2>
     <canvas id="c-jit" height="180"></canvas>
