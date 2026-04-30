@@ -1846,6 +1846,56 @@ def _extract_guest_program(command):
     return head
 
 
+def _aggregate_tier_breakdown(pm_iter, total_alloc):
+    """Aggregate per-PID custommem-tier counters into a flat dict.
+
+    `pm_iter` yields proc_mem rows (the BPF map values, in production;
+    plain objects with the same attribute names in tests). Each row must
+    expose tier64_count, tier128_count, aligned_count, aligned_bytes,
+    stray_free_count, slab_grow_count.
+
+    `total_alloc` is the malloc + calloc + realloc count (i.e. the
+    denominator for the tier percentages — taken from the global stats
+    array, not derived per-row, because per-row malloc_count doesn't
+    distinguish customMalloc from customCalloc/Realloc).
+
+    LIST count is derived: max(0, total_alloc - tier64 - tier128). The
+    clamp matters because the global stats counter and the per-PID
+    tier counters are updated independently, so a sampling skew can
+    transiently make tier64+tier128 exceed total — better to show 0%
+    LIST than a negative count.
+    """
+    tier64 = tier128 = 0
+    aligned = aligned_bytes = 0
+    stray = slab_grow = 0
+    for pm in pm_iter:
+        tier64        += pm.tier64_count
+        tier128       += pm.tier128_count
+        aligned       += pm.aligned_count
+        aligned_bytes += pm.aligned_bytes
+        stray         += pm.stray_free_count
+        slab_grow     += pm.slab_grow_count
+    list_count = max(0, total_alloc - tier64 - tier128)
+    if total_alloc > 0:
+        tier64_pct  = tier64  / total_alloc * 100
+        tier128_pct = tier128 / total_alloc * 100
+        list_pct    = list_count / total_alloc * 100
+    else:
+        tier64_pct = tier128_pct = list_pct = 0.0
+    return {
+        "tier64": tier64,
+        "tier128": tier128,
+        "list": list_count,
+        "tier64_pct": tier64_pct,
+        "tier128_pct": tier128_pct,
+        "list_pct": list_pct,
+        "aligned_count": aligned,
+        "aligned_bytes": aligned_bytes,
+        "stray_free": stray,
+        "slab_grow": slab_grow,
+    }
+
+
 def _wait_for_user_signal(flag, poll_interval=0.5):
     """Block until `flag[0]` becomes truthy.
 
@@ -2929,40 +2979,32 @@ def main():
             print(f"    calloc:   {vals[2]:>12}   realloc:{vals[3]:>12}")
             print(f"    bytes allocated: {fmt_size(vals[4]):>12}   bytes freed: {fmt_size(vals[5]):>12}")
 
-            # Tier breakdown across all tracked PIDs. Aggregated from
-            # proc_mem_t.tier{64,128}_count + the aligned/stray/grow
-            # counters that the new probes feed.
-            agg_tier64 = agg_tier128 = 0
-            agg_aligned = agg_aligned_bytes = 0
-            agg_stray = agg_slab_grow = 0
+            # Tier breakdown across all tracked PIDs. The aggregation +
+            # percentage math lives in _aggregate_tier_breakdown so it
+            # can be unit-tested without a live BPF map.
             try:
-                for _, pm in b["proc_mem"].items():
-                    agg_tier64       += pm.tier64_count
-                    agg_tier128      += pm.tier128_count
-                    agg_aligned      += pm.aligned_count
-                    agg_aligned_bytes += pm.aligned_bytes
-                    agg_stray        += pm.stray_free_count
-                    agg_slab_grow    += pm.slab_grow_count
+                pm_iter = (pm for _, pm in b["proc_mem"].items())
+                total_alloc = vals[0] + vals[2] + vals[3]
+                agg = _aggregate_tier_breakdown(pm_iter, total_alloc)
             except Exception:
-                pass
-            total_alloc = vals[0] + vals[2] + vals[3]
-            agg_list = max(0, total_alloc - agg_tier64 - agg_tier128)
+                agg = _aggregate_tier_breakdown(iter(()), 0)
+                total_alloc = 0
             print(f"\n    Tier breakdown (custommem.c 3-tier slab):")
             if total_alloc > 0:
-                print(f"      slab 64B:  {agg_tier64:>10,}  "
-                      f"({agg_tier64 / total_alloc * 100:>5.1f}%)")
-                print(f"      slab 128B: {agg_tier128:>10,}  "
-                      f"({agg_tier128 / total_alloc * 100:>5.1f}%)")
-                print(f"      LIST:      {agg_list:>10,}  "
-                      f"({agg_list / total_alloc * 100:>5.1f}%)  (size > 128)")
+                print(f"      slab 64B:  {agg['tier64']:>10,}  "
+                      f"({agg['tier64_pct']:>5.1f}%)")
+                print(f"      slab 128B: {agg['tier128']:>10,}  "
+                      f"({agg['tier128_pct']:>5.1f}%)")
+                print(f"      LIST:      {agg['list']:>10,}  "
+                      f"({agg['list_pct']:>5.1f}%)  (size > 128)")
             else:
                 print(f"      (no allocations recorded)")
-            print(f"    customMemAligned:     {agg_aligned:>10,} calls, "
-                  f"{fmt_size(agg_aligned_bytes):>12} bytes")
-            print(f"    Stray frees:          {agg_stray:>10,}  "
+            print(f"    customMemAligned:     {agg['aligned_count']:>10,} calls, "
+                  f"{fmt_size(agg['aligned_bytes']):>12} bytes")
+            print(f"    Stray frees:          {agg['stray_free']:>10,}  "
                   f"(free of ptr we never observed; high values ⇒ buggy "
                   f"guest free pattern OR pre-attach allocations)")
-            print(f"    Slab-grow events:     {agg_slab_grow:>10,}  "
+            print(f"    Slab-grow events:     {agg['slab_grow']:>10,}  "
                   f"(InternalMmap/box_mmap inside customMalloc — fresh "
                   f"backing region needed)")
 
