@@ -158,8 +158,9 @@ sudo box64_trace -- box64 MyGame.x86_64                 # also fine
 The web dashboard is **on by default** when you run `box64_trace.py`
 — it starts a local-only HTTP server (port 8642, or `$BOX64_WEB_PORT`)
 and opens the URL in your default browser. Pass `--no-web` to disable
-it entirely, or `--web PORT` to pick a different base port (the server
-auto-scans up to 20 ports above this if the chosen one is in use).
+it entirely, or `--web-port PORT` to pick a different base port (the
+server auto-scans up to 20 ports above this if the chosen one is in
+use).
 
 ### What the dashboard shows
 

@@ -14,6 +14,7 @@ import http.client
 import json
 import os
 import socket
+import struct
 import threading
 import time
 
@@ -368,6 +369,55 @@ class TestSSE:
         assert b"event: process" in payload
         assert b'"action": "fork"' in payload
         assert b'"pid": 42' in payload
+
+
+# ---------------------------------------------------------------------------
+# Client disconnect handling: browsers abort short fetches all the time
+# (tab close, navigation, reload, polling-XHR timeout). Without a guard,
+# the server logs a full traceback per disconnect — drowning the terminal
+# in `BrokenPipeError [Errno 32]` noise during normal use.
+# ---------------------------------------------------------------------------
+
+class TestClientDisconnect:
+    def test_abort_mid_response_does_not_break_server(
+            self, dashboard, capsys):
+        # Send a real HTTP/1.1 request, then close the socket BEFORE
+        # reading the response. The server's wfile.write will fail with
+        # BrokenPipeError; the override on Handler.handle_one_request must
+        # swallow it so no traceback hits stderr and the server stays up.
+        port, _ = dashboard
+
+        # Fire a few aborted fetches in quick succession — what a flaky
+        # browser tab actually does on a polling dashboard.
+        for _ in range(5):
+            s = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+            s.sendall(b"GET /api/snapshot HTTP/1.1\r\n"
+                      b"Host: 127.0.0.1\r\n"
+                      b"Connection: close\r\n\r\n")
+            # Don't recv() — drop the socket while the server is still
+            # writing the response. SO_LINGER=0 forces a RST instead of
+            # a graceful close so the server sees the disconnect even on
+            # very small responses.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                         struct.pack("ii", 1, 0))
+            s.close()
+
+        # Give the threads a moment to finish writing and hit the catch.
+        time.sleep(0.3)
+
+        # The dashboard must still respond normally to a fresh client.
+        status, body = _http_get(port, "/api/snapshot")
+        assert status == 200
+        assert json.loads(body)  # non-empty snapshot
+
+        # Critically: no `BrokenPipeError` traceback in stderr. http.server
+        # writes its error tracebacks to sys.stderr via handle_error.
+        err = capsys.readouterr().err
+        assert "BrokenPipeError" not in err, (
+            f"client disconnect dumped a traceback (regression — guard "
+            f"on handle_one_request didn't catch it):\n{err}")
+        assert "Traceback" not in err, (
+            f"unexpected traceback on client disconnect:\n{err}")
 
 
 # ---------------------------------------------------------------------------

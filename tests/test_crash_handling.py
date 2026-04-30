@@ -222,3 +222,103 @@ class TestWaitForUserSignal:
         finally:
             time.sleep = original
         # No exception propagated — that's the assertion.
+
+
+# ---------------------------------------------------------------------------
+# _should_keep_dashboard_alive: the four-case decision matrix at end-of-run.
+#   web on/off  x  program clean exit / crash signal
+# Only (web=on, crashed) keeps the dashboard alive for inspection. Everything
+# else exits immediately — making the user Ctrl+C through a clean run is
+# friction with no payoff.
+# ---------------------------------------------------------------------------
+
+_RC_CLEAN = 0
+_RC_NONZERO_CLEAN = 42
+_RC_SEGV = 128 + signal.SIGSEGV
+_RC_ABRT = 128 + signal.SIGABRT
+_RC_TERM = 128 + signal.SIGTERM   # user-initiated, not a crash
+_RC_INT = 128 + signal.SIGINT     # ditto
+
+
+class TestShouldKeepDashboardAlive:
+    # The four canonical cases — this is the contract the user asked for.
+
+    def test_web_on_crashed_keeps_dashboard(self):
+        # web=on, program crashed: the whole reason the dashboard exists
+        # is to inspect this case.
+        assert box64_trace._should_keep_dashboard_alive(
+            web_active=True, child_exited=True, user_signalled=False,
+            child_returncode=_RC_SEGV) is True
+
+    def test_web_on_clean_exits_immediately(self):
+        # web=on, clean exit: nothing to investigate; don't make the user
+        # Ctrl+C through a successful run.
+        assert box64_trace._should_keep_dashboard_alive(
+            web_active=True, child_exited=True, user_signalled=False,
+            child_returncode=_RC_CLEAN) is False
+
+    def test_web_off_crashed_exits_immediately(self):
+        # web=off, program crashed: no dashboard to inspect, just exit.
+        assert box64_trace._should_keep_dashboard_alive(
+            web_active=False, child_exited=True, user_signalled=False,
+            child_returncode=_RC_SEGV) is False
+
+    def test_web_off_clean_exits_immediately(self):
+        # web=off, clean exit: trivially nothing to do.
+        assert box64_trace._should_keep_dashboard_alive(
+            web_active=False, child_exited=True, user_signalled=False,
+            child_returncode=_RC_CLEAN) is False
+
+    # ---- additional gates around the matrix ----
+
+    @pytest.mark.parametrize("rc", [_RC_SEGV, _RC_ABRT,
+                                    128 + signal.SIGILL,
+                                    128 + signal.SIGBUS,
+                                    128 + signal.SIGFPE])
+    def test_all_crash_class_signals_keep_dashboard(self, rc):
+        # SIGSEGV/SIGABRT/SIGILL/SIGBUS/SIGFPE all count as crashes.
+        assert box64_trace._should_keep_dashboard_alive(
+            web_active=True, child_exited=True, user_signalled=False,
+            child_returncode=rc) is True
+
+    @pytest.mark.parametrize("rc", [_RC_TERM, _RC_INT, 128 + signal.SIGHUP])
+    def test_user_signals_dont_count_as_crash(self, rc):
+        # SIGTERM/SIGINT/SIGHUP are user-initiated stops, not crashes.
+        # No reason to keep the dashboard up — the user told it to stop.
+        assert box64_trace._should_keep_dashboard_alive(
+            web_active=True, child_exited=True, user_signalled=False,
+            child_returncode=rc) is False
+
+    def test_nonzero_clean_exit_is_not_a_crash(self):
+        # A program that exit(1)s on its own is not a crash — no signal,
+        # so no DynaRec-isolation hint applies, and no dashboard wait.
+        assert box64_trace._should_keep_dashboard_alive(
+            web_active=True, child_exited=True, user_signalled=False,
+            child_returncode=_RC_NONZERO_CLEAN) is False
+
+    def test_user_already_signalled_skips_wait(self):
+        # If the user already Ctrl+C'd, they want out — don't ask them
+        # to Ctrl+C a second time, even on a crash.
+        assert box64_trace._should_keep_dashboard_alive(
+            web_active=True, child_exited=True, user_signalled=True,
+            child_returncode=_RC_SEGV) is False
+
+    def test_child_not_exited_skips_wait(self):
+        # We only wait if the child actually exited via waitpid. A stale
+        # spawn that we tore down ourselves shouldn't trigger the wait.
+        assert box64_trace._should_keep_dashboard_alive(
+            web_active=True, child_exited=False, user_signalled=False,
+            child_returncode=_RC_SEGV) is False
+
+    def test_rc_127_exec_failure_skips_wait(self):
+        # rc=127 is our exec-failure marker (_validate_spawn_command).
+        # Nothing ever ran, so the dashboard has nothing to show.
+        assert box64_trace._should_keep_dashboard_alive(
+            web_active=True, child_exited=True, user_signalled=False,
+            child_returncode=127) is False
+
+    def test_returncode_none_skips_wait(self):
+        # Defensive: caller may pass None if waitpid never resolved.
+        assert box64_trace._should_keep_dashboard_alive(
+            web_active=True, child_exited=True, user_signalled=False,
+            child_returncode=None) is False

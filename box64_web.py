@@ -1,4 +1,4 @@
-"""HTTP server for box64_trace.py's optional --web dashboard.
+"""HTTP server for box64_trace.py's web dashboard (disabled with --no-web).
 
 Lifts the API contract from kbox (web/js/polling.js):
 - GET /api/snapshot — current stats (polled every pollInterval)
@@ -144,6 +144,19 @@ _CONTENT_TYPES = {
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return  # silence default access logging
+
+    def handle_one_request(self):
+        # Browsers routinely abort short JSON/static fetches (tab close,
+        # navigation, reload, polling timeout) — the half-written response
+        # surfaces here as BrokenPipeError / ConnectionResetError. Without
+        # this catch, http.server's default error handler dumps a full
+        # traceback per disconnect, swamping the terminal. The SSE handler
+        # already has its own catch for the long-lived stream; this covers
+        # every other endpoint uniformly, including any future ones.
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def _send_json(self, obj, status=200):
         body = json.dumps(obj).encode("utf-8")

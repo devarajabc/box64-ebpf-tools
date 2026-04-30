@@ -73,7 +73,7 @@ sudo box64_memleak -p <PID>                 # leak detection on a running proces
 ```
 
 The web dashboard is **on by default** (port 8642, or `$BOX64_WEB_PORT`);
-pass `--no-web` to disable, or `--web PORT` to pick a different port.
+pass `--no-web` to disable, or `--web-port PORT` to pick a different port.
 Common flags: `-b BINARY` (default `/usr/local/bin/box64`, falls back
 to `which box64`), `-p PID` (`0` = all), `-i INTERVAL` (seconds),
 `--browser CMD`. Press **Ctrl+C** to stop and print the full report.

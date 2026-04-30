@@ -1536,16 +1536,17 @@ def parse_args():
     # (the inherited kbox-observatory default). The pre-flight check below
     # auto-scans upward if the chosen port is busy, so this is just a
     # starting point, not a hard requirement.
-    _default_web = int(os.environ.get("BOX64_WEB_PORT", "8642"))
-    p.add_argument("--web", type=int, nargs="?", const=_default_web, default=0,
+    _default_web_port = int(os.environ.get("BOX64_WEB_PORT", "8642"))
+    p.add_argument("--web-port", type=int, default=_default_web_port,
                    metavar="PORT",
-                   help=f"Start a web dashboard on http://127.0.0.1:PORT "
-                        f"(default {_default_web}, override globally with "
-                        f"$BOX64_WEB_PORT). Auto-scans upward if the port "
-                        f"is busy. Auto-enabled in spawn mode.")
+                   help=f"Port for the web dashboard "
+                        f"(default {_default_web_port}, override globally "
+                        f"with $BOX64_WEB_PORT). Auto-scans upward if the "
+                        f"port is busy.")
     p.add_argument("--no-web", action="store_true",
-                   help="Disable the web dashboard (only meaningful in spawn mode, "
-                        "where --web is otherwise auto-enabled)")
+                   help="Disable the web dashboard. By default the dashboard "
+                        "starts on http://127.0.0.1:8642 in both spawn and "
+                        "attach modes; pass this to skip it entirely.")
     p.add_argument("--browser", default="auto", metavar="CMD",
                    help="Browser to auto-open the dashboard. 'auto' (default) "
                         "respects $BROWSER, then xdg-open, then Python's "
@@ -1702,6 +1703,39 @@ def _wait_for_user_signal(flag, poll_interval=0.5):
         pass
 
 
+def _should_keep_dashboard_alive(web_active, child_exited, user_signalled,
+                                 child_returncode):
+    """Decide whether to keep the dashboard alive after FINAL REPORT.
+
+    Four cases at end-of-run, by (web on/off) x (program clean/crashed):
+
+      web=on,  crashed → True   (dashboard exists, crash worth inspecting)
+      web=on,  clean   → False  (nothing to investigate; don't make user wait)
+      web=off, crashed → False  (no dashboard to inspect)
+      web=off, clean   → False  (nothing to do)
+
+    "Crashed" here means the child died from a crash-class signal
+    (SIGSEGV/SIGABRT/SIGILL/SIGBUS/SIGFPE — `_CRASH_SIGNALS`). SIGTERM
+    /SIGINT are user-initiated stops and don't count.
+
+    Also gated:
+      - child must have actually exited (we observed it with waitpid),
+      - user must not have already Ctrl+C'd (in which case they want out),
+      - rc must not be 127 (our exec-failure marker; nothing ever ran).
+    """
+    if not web_active:
+        return False
+    if not child_exited:
+        return False
+    if user_signalled:
+        return False
+    if child_returncode is None:
+        return False
+    if child_returncode == 127:
+        return False
+    return (child_returncode - 128) in _CRASH_SIGNALS
+
+
 def _spawn_paused(cmd):
     """
     Fork+exec `cmd`, but SIGSTOP the child *before* exec so the parent has
@@ -1819,14 +1853,11 @@ def main():
 
     # ---- Spawn-and-trace mode ----
     # If a `-- COMMAND` was given, fork it now in stopped state, pin our
-    # PID filter to its PID, and auto-enable the web dashboard. The child
-    # is resumed (SIGCONT) only after probes have been attached below.
+    # PID filter to its PID. The child is resumed (SIGCONT) only after
+    # probes have been attached below. The dashboard is on by default
+    # (see --no-web) so spawn mode needs no additional setup here.
     spawned_pid = None
     if args.command:
-        if not args.web and not args.no_web:
-            # Use the same env-overridable default as the --web flag.
-            args.web = int(os.environ.get("BOX64_WEB_PORT", "8642"))
-
         # Validate the command will actually exec BEFORE we spend ~10s
         # compiling BPF and attaching 42 probes. May auto-rewrite cmd[0]
         # for bare-name-in-cwd cases the way box64 itself does.
@@ -2420,7 +2451,7 @@ def main():
         st = b["steam_stats"]
         return [st[st.Key(i)].value for i in range(32)]
 
-    # ---- Web dashboard snapshot (only built if --web is on) ----
+    # ---- Web dashboard snapshot (only built when the dashboard is enabled) ----
     def _hist_snapshot(map_name):
         """Read a BPF_HISTOGRAM into a list of {bucket, count} dicts."""
         try:
@@ -3422,24 +3453,24 @@ def main():
     web_server = None
     web_module = None
     _web_emit = None
-    if args.web:
+    if not args.no_web:
         try:
             import box64_web
             web_server = box64_web.start(
-                args.web, web_snapshot, web_stats_meta,
+                args.web_port, web_snapshot, web_stats_meta,
                 browser_pref=args.browser)
             web_module = box64_web
             _web_emit = box64_web.emit_event
         except OSError as e:
-            # box64_web.start() auto-scans 20 ports above args.web plus
+            # box64_web.start() auto-scans 20 ports above args.web_port plus
             # the kernel ephemeral range, so reaching this branch means
             # everything failed — extremely unusual on a sane host.
             import errno
             if e.errno == errno.EACCES:
                 print(f"WARNING: permission denied binding ports near "
-                      f"{args.web} — dashboard disabled.")
+                      f"{args.web_port} — dashboard disabled.")
                 print(f"         Ports < 1024 require CAP_NET_BIND_SERVICE; "
-                      f"pick a higher base port with `--web NNNN`.")
+                      f"pick a higher base port with `--web-port NNNN`.")
             else:
                 # The OSError raised by start() already lists what was
                 # tried; just relay it.
@@ -3533,20 +3564,21 @@ def main():
         except (ProcessLookupError, ChildProcessError):
             pass
 
-    # If the dashboard is up and the child exited on its own (not because
-    # the user Ctrl+C'd), stay alive so the user can switch to the browser
-    # and inspect what was happening when box64 died. This is the whole
-    # reason for the dashboard — exiting silently here defeats it.
-    #
-    # Skip the wait when rc=127 (our exec-failure marker from _spawn_paused
-    # plus _validate_spawn_command's exit code): the child never actually
-    # ran, so the report is empty and the dashboard has nothing to show.
-    if (web_module is not None and web_server is not None
-            and child_exited[0] and not _user_signalled[0]
-            and child_returncode[0] != 127):
+    # Only keep the dashboard alive when there's actually a crash to
+    # inspect. Clean exits (and runs where --no-web disabled the dashboard)
+    # just exit; making the user Ctrl+C through a successful run is
+    # friction with no payoff. See _should_keep_dashboard_alive for the
+    # full case matrix.
+    if _should_keep_dashboard_alive(
+            web_active=(web_module is not None and web_server is not None),
+            child_exited=child_exited[0],
+            user_signalled=_user_signalled[0],
+            child_returncode=child_returncode[0]):
         host_port = f"{web_server.server_address[0]}:{web_server.server_address[1]}"
-        print(f"[*] Dashboard still serving at http://{host_port}/ — "
-              f"Ctrl+C to shut down (will exit rc={child_returncode[0]}).")
+        print(f"[*] Child crashed — dashboard still serving at "
+              f"http://{host_port}/ so you can inspect what was happening "
+              f"at the moment of the crash. Ctrl+C to shut down "
+              f"(will exit rc={child_returncode[0]}).")
         _wait_for_user_signal(_user_signalled)
 
     # Tear down the dashboard cleanly. Idempotent — shutdown() on an

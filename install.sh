@@ -8,12 +8,12 @@
 #   2. Verify `box64` is on $PATH and was built with debug symbols
 #      (--no-box64-check skips). Without `customMalloc` exported by
 #      RelWithDebInfo, the uprobes have nothing to attach to.
-#   3. Detect a browser launcher for the --web dashboard's auto-open
+#   3. Detect a browser launcher for the dashboard's auto-open
 #      (--no-browser-check skips). Surfaces what `auto` mode will
 #      pick: $BROWSER, then any of firefox/chromium/google-chrome/
 #      brave/edge/vivaldi/opera/epiphany/falkon, then xdg-open. Warns
-#      (non-fatal) if nothing is found — --web always prints the URL
-#      so copy-paste still works.
+#      (non-fatal) if nothing is found — the dashboard always prints
+#      its URL so copy-paste still works.
 #   4. Copy the Python sources + web/ frontend into
 #      $PREFIX/lib/box64-ebpf-tools/ and emit thin shell wrappers in
 #      $PREFIX/bin/.
@@ -282,7 +282,7 @@ check_kernel_headers() {
 # ---------------------------------------------------------------------------
 
 check_browser() {
-    # The --web dashboard *always* prints its URL, so a missing browser
+    # The web dashboard *always* prints its URL, so a missing browser
     # launcher is never fatal — it just means the user has to copy-paste
     # instead of having Firefox/Chrome auto-pop. Surface what's available
     # so the user knows what `auto` mode will pick (and what to override
@@ -318,7 +318,7 @@ check_browser() {
         echo "          override at runtime with --browser <cmd> or \$BROWSER."
     else
         echo "[browser] WARNING: no browser launcher detected on \$PATH."
-        echo "          --web will print the dashboard URL but won't auto-open."
+        echo "          The dashboard will print its URL but won't auto-open."
         echo "          Install a browser, set \$BROWSER, or use --browser <cmd>."
     fi
 }

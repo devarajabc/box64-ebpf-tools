@@ -742,7 +742,7 @@ def check_spawn_mode(box64_bin, stress_bin, timeout=60):
 
     ok = not errors
     if ok:
-        print(f"  PASS  box64_trace.py --web -- spawn mode (all assertions)")
+        print(f"  PASS  box64_trace.py -- spawn mode (all assertions)")
     return ok, errors
 
 

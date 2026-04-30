@@ -525,8 +525,9 @@ class TestFirefoxIsRunning:
 
 # ---------------------------------------------------------------------------
 # Realistic (pref × sudo × firefox-running × session-env) matrix.
-# These exercise the actual command lines `box64_trace --web` users hit:
+# These exercise the actual command lines `box64_trace` users hit
 # under sudo with various browser preferences and firefox availability.
+# (The dashboard is on by default, so no flag is needed to enable it.)
 # ---------------------------------------------------------------------------
 
 
@@ -550,7 +551,7 @@ def _split_env_and_cmd(argv, sudo_user):
 
 class TestSudoMatrix:
     """The realistic (pref × sudo × firefox-running × session-env) matrix
-    that real `box64_trace --web` invocations hit."""
+    that real `box64_trace` invocations hit (dashboard on by default)."""
 
     SESSION_ENV = {
         "DISPLAY": ":0",
@@ -588,8 +589,9 @@ class TestSudoMatrix:
     def test_auto_sudo_firefox_running_full_pipeline(
             self, fake_popen, under_sudo, monkeypatch):
         # The most common path: user has Firefox open, runs
-        # `sudo box64_trace --web` (no --browser), tracer auto-resolves
-        # to firefox --new-tab via _firefox_is_running()=True.
+        # `sudo box64_trace` (dashboard on by default, no --browser),
+        # tracer auto-resolves to firefox --new-tab via
+        # _firefox_is_running()=True.
         monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
         monkeypatch.setattr(box64_web, "_firefox_is_running", lambda: True)
         opened, _ = box64_web._open_browser(URL, "auto")
